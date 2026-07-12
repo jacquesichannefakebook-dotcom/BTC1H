@@ -1,0 +1,17 @@
+{
+  "name": "BTC1H",
+  "short_name": "BTC1H",
+  "description": "Lecture directionnelle BTC 1h en temps reel avec signal, creneaux et historique horaire.",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#101312",
+  "theme_color": "#101312",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

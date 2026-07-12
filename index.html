@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BTC1H</title>
+  <meta name="description" content="BTC1H analyse le Bitcoin en temps reel avec momentum, volatilite, EMA, MACD, RSI, volume, creneaux horaires et historique horaire.">
+  <meta name="theme-color" content="#101312">
+  <meta property="og:title" content="BTC1H">
+  <meta property="og:description" content="Lecture directionnelle BTC en temps reel, avec signal + / - / ~, graphiques, creneaux et historique horaire.">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="icon.svg">
+  <meta name="twitter:card" content="summary">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="shell">
+    <section class="topbar" aria-label="Controle principal">
+      <div>
+        <p class="eyebrow">BTC1H</p>
+        <h1>Lecture BTC 1h</h1>
+      </div>
+      <div class="top-actions">
+        <button id="shareBtn" type="button">Partager</button>
+        <button id="refreshBtn" class="primary" type="button">Actualiser</button>
+      </div>
+    </section>
+
+    <section class="quota-bar" id="quotaBar" aria-label="Temps gratuit restant">
+      <div>
+        <span>Acces gratuit</span>
+        <strong id="quotaTimeValue">--</strong>
+      </div>
+      <div class="quota-track" aria-hidden="true">
+        <div id="quotaFill"></div>
+      </div>
+      <button id="rewardAdBtn" type="button">Voir une pub +2h</button>
+    </section>
+
+    <section class="ad-slot ad-slot-wide" aria-label="Publicite">
+      <span>Partenaire</span>
+      <strong>Espace annonce 970 x 90</strong>
+      <small>Emplacement pret pour AdSense, sponsor direct ou affiliation crypto responsable.</small>
+    </section>
+
+    <section class="controls" aria-label="Parametres">
+      <label>
+        Horizon
+        <select id="horizonInput">
+          <option value="15">15 min</option>
+          <option value="30">30 min</option>
+          <option value="45">45 min</option>
+          <option value="60" selected>1 heure</option>
+          <option value="90">1 h 30</option>
+          <option value="120">2 heures</option>
+          <option value="180">3 heures</option>
+        </select>
+      </label>
+      <label>
+        Sensibilite
+        <select id="sensitivityInput">
+          <option value="0.35">Rapide</option>
+          <option value="0.55" selected>Equilibree</option>
+          <option value="0.8">Prudente</option>
+        </select>
+      </label>
+      <label>
+        URL Polymarket optionnelle
+        <input id="marketUrlInput" type="search" placeholder="https://polymarket.com/event/...">
+      </label>
+      <button id="loadMarketBtn" type="button">Lire creneau</button>
+      <label class="check-row">
+        <input id="liveToggle" type="checkbox" checked>
+        Live
+      </label>
+      <label class="check-row">
+        <input id="indicatorChartsToggle" type="checkbox">
+        Graphiques indicateurs
+      </label>
+    </section>
+
+    <section class="status-line" id="statusLine" aria-live="polite">Pret.</section>
+    <section class="status-line share-line" id="shareStatus" aria-live="polite"></section>
+
+    <section class="decision-layout">
+      <section class="hero-signal" id="signalCard" aria-label="Signal principal">
+        <div>
+          <span>Lecture simple</span>
+          <strong id="directionValue">--</strong>
+        </div>
+        <div class="hero-details">
+          <span id="directionText">En attente des donnees BTC.</span>
+          <small id="directionContext">Le moteur compare la pression estimee au prix actuel.</small>
+        </div>
+      </section>
+
+      <section class="clarity-card" aria-label="Resume lisible">
+        <h2>A retenir</h2>
+        <div id="plainSummary" class="plain-summary">Chargement de l'analyse...</div>
+      </section>
+    </section>
+
+    <section class="scoreboard" aria-label="Resultats">
+      <article class="stat">
+        <span>Maintenant</span>
+        <strong id="spotValue">--</strong>
+        <small>prix BTC actuel</small>
+      </article>
+      <article class="stat">
+        <span>Objectif estime</span>
+        <strong id="forecastValue">--</strong>
+        <small id="forecastContext">Horizon 1h</small>
+      </article>
+      <article class="stat">
+        <span>Difference</span>
+        <strong id="deltaValue">--</strong>
+        <small id="deltaContext">vs maintenant</small>
+      </article>
+      <article class="stat">
+        <span>Confiance live</span>
+        <strong id="confidenceValue">--</strong>
+        <small id="confidenceContext">Force du signal</small>
+      </article>
+    </section>
+
+    <details class="panel compact">
+      <summary>Comparer les deux hypotheses</summary>
+      <section class="hypothesis-grid" aria-label="Hypotheses de confiance">
+        <article class="hypothesis-card" id="liveHypothesisCard">
+          <span>Live</span>
+          <strong id="liveHypothesisValue">--</strong>
+          <small id="liveHypothesisContext">Recalcule en continu.</small>
+        </article>
+        <article class="hypothesis-card" id="fixedHypothesisCard">
+          <span>Fixe pour cette heure</span>
+          <strong id="fixedHypothesisValue">--</strong>
+          <small id="fixedHypothesisContext">Capture une fois par heure.</small>
+        </article>
+      </section>
+    </details>
+
+    <section class="panel compact hourly-model-panel">
+      <div class="panel-head">
+        <div>
+          <h2>Modele cloture horaire</h2>
+          <p>Lecture specialisee pour savoir si l'heure courante a plus de chances de finir au-dessus ou sous son ouverture.</p>
+        </div>
+      </div>
+      <div class="hourly-close-grid">
+        <article class="hourly-close-main" id="hourlyCloseCard">
+          <span>Cloture estimee</span>
+          <strong id="hourlyCloseValue">--</strong>
+          <small id="hourlyCloseContext">En attente des donnees.</small>
+        </article>
+        <div class="hourly-close-factors" id="hourlyCloseFactors"></div>
+      </div>
+    </section>
+
+    <section class="workbench">
+      <article class="panel chart-panel">
+        <div class="panel-head">
+          <div>
+            <h2>Trajectoire detaillee</h2>
+            <p>Prix BTC 1 minute, heures pleines et temps restant avant la prochaine heure.</p>
+          </div>
+          <span id="chartBadge">--</span>
+        </div>
+        <svg id="priceChart" role="img" aria-label="Graphique BTC avec projection"></svg>
+      </article>
+    </section>
+
+    <details class="analysis-details">
+      <summary>Voir les indicateurs et les creneaux</summary>
+      <section class="analysis-grid">
+      <article class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Indicateurs</h2>
+            <p id="marketQuestion">Aucun creneau Polymarket charge.</p>
+          </div>
+        </div>
+        <div class="signal-list" id="signalList"></div>
+      </article>
+
+      <article class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Creneaux horaires</h2>
+            <p>Moment present, prochaine heure et horizon suivant.</p>
+          </div>
+        </div>
+        <div class="slot-grid" id="slotGrid"></div>
+      </article>
+      </section>
+    </details>
+
+    <section class="ad-grid" aria-label="Publicites">
+      <article class="ad-slot">
+        <span>Partenaire</span>
+        <strong>Espace annonce 300 x 250</strong>
+        <small>Signal, data, courtage, education ou newsletter.</small>
+      </article>
+      <article class="ad-slot">
+        <span>Partenaire</span>
+        <strong>Espace annonce natif</strong>
+        <small>Format integre, sans masquer les donnees importantes.</small>
+      </article>
+    </section>
+
+    <section class="panel compact priority-panel">
+      <div class="panel-head">
+        <div>
+          <h2>A etudier</h2>
+          <p>Points de lecture pour comprendre le contexte avant de suivre le signal.</p>
+        </div>
+      </div>
+      <div class="study-list" id="studyList"></div>
+    </section>
+
+    <details class="panel compact">
+      <summary>Voir l'historique horaire</summary>
+      <div class="panel-head">
+        <div>
+          <h2>Historique horaire</h2>
+          <p>Dernieres heures terminees, avec leur sens final et leur amplitude.</p>
+        </div>
+      </div>
+      <div class="hour-history" id="hourHistory"></div>
+    </details>
+
+    <details class="panel compact" open>
+      <summary>Supervision du moteur</summary>
+      <div class="panel-head">
+        <div>
+          <h2>Fiabilite recente</h2>
+          <p>Le moteur rejoue les dernieres heures disponibles et ajuste sa confiance selon ses resultats recents.</p>
+        </div>
+      </div>
+      <div class="supervision-grid" id="modelSupervision"></div>
+    </details>
+
+    <details class="panel compact">
+      <summary>Activite technique</summary>
+      <div id="logBox" class="log-box"></div>
+    </details>
+
+    <footer class="footer-note">
+      <strong>Information uniquement.</strong>
+      <span>BTC1H n'est pas un conseil financier, ne garantit aucun resultat et ne passe aucun ordre.</span>
+    </footer>
+  </main>
+
+  <section class="quota-overlay" id="quotaOverlay" aria-live="polite" hidden>
+    <div class="quota-dialog">
+      <span>Temps gratuit termine</span>
+      <strong>Reviens demain ou regarde une pub pour ajouter 2h.</strong>
+      <p>Le quota gratuit compte le temps pendant lequel l'application reste ouverte dans ce navigateur.</p>
+      <button id="overlayRewardAdBtn" class="primary" type="button">Voir une pub +2h</button>
+    </div>
+  </section>
+
+  <script src="app.js"></script>
+</body>
+</html>

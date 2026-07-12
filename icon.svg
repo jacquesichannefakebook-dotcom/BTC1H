@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="BTC1H">
+  <defs>
+    <linearGradient id="bg" x1="64" y1="448" x2="448" y2="64" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0f1412"/>
+      <stop offset="0.58" stop-color="#17231f"/>
+      <stop offset="1" stop-color="#20352d"/>
+    </linearGradient>
+    <linearGradient id="pulse" x1="112" y1="300" x2="400" y2="220" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#61d394"/>
+      <stop offset="1" stop-color="#f5b84b"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <circle cx="256" cy="256" r="178" fill="none" stroke="#2d4239" stroke-width="24"/>
+  <path d="M256 92v56M256 364v56M92 256h56M364 256h56" stroke="#edf2ef" stroke-width="18" stroke-linecap="round" opacity="0.72"/>
+  <path d="M120 300h62l36-78 52 112 46-94h76" fill="none" stroke="url(#pulse)" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M174 174h72c38 0 62 20 62 50 0 23-14 39-39 48 31 7 50 27 50 56 0 35-28 56-70 56h-75" fill="none" stroke="#edf2ef" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M218 136v76M218 340v40M252 136v76M252 340v40" stroke="#edf2ef" stroke-width="18" stroke-linecap="round"/>
+  <rect x="296" y="102" width="112" height="54" rx="27" fill="#edf2ef"/>
+  <text x="352" y="138" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="31" font-weight="800" fill="#101312">1H</text>
+  <text x="256" y="444" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="58" font-weight="900" letter-spacing="0" fill="#edf2ef">BTC1H</text>
+</svg>
