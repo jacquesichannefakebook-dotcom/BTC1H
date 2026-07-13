@@ -7,9 +7,12 @@ L'application est un site statique. Elle peut etre publiee sur Netlify, Vercel, 
 - `index.html`
 - `styles.css`
 - `app.js`
+- `config.js`
 - `manifest.webmanifest`
 - `icon.svg`
 - `robots.txt`
+
+Pour activer la memoire horaire lorsque l'application est fermee, deployer egalement le dossier `supabase` en suivant `SUPABASE_SETUP.md`. Les fichiers statiques seuls continuent de fonctionner, mais restent en mode local.
 
 ## Mobile partageable
 

@@ -8,7 +8,7 @@ Elle affiche un signal simple :
 - `-` : valeur BTC anticipee sous le prix actuel.
 - `~` : zone neutre, signal insuffisant face au bruit.
 
-L'interface met d'abord en avant une lecture simple : scenario principal, confiance live, resume "A retenir", puis les details techniques dans des sections repliables.
+L'interface met d'abord en avant une lecture simple : scenario principal, cap live, repere d'ouverture, resume "A retenir", puis les details techniques dans des sections repliables.
 
 ## Utilisation
 
@@ -28,15 +28,24 @@ Le graphique affiche les ticks de 15 minutes, les heures pleines, la prochaine h
 
 La section "Creneaux horaires" compare le moment present, la fin de l'heure courante, l'heure suivante et l'horizon choisi.
 
+Les cartes principales separent maintenant :
+
+- `Cap live` : objectif variable, recalcule en continu, avec confiance variable.
+- `Repere d'ouverture` : objectif fixe, calcule au debut de l'heure, avec confiance fixe.
+
 La section "A etudier" resume les zones de range, l'invalidation, l'amplitude normale et les points qui meritent attention avant d'interpreter le signal.
 
 La section "Historique horaire" affiche les dernieres heures terminees : sens final, variation, ouverture, cloture et amplitude.
 
-La section "Hypotheses de confiance" separe le signal live, recalcule en continu, et l'hypothese horaire fixe, capturee une fois pour l'heure courante. Quand l'heure se termine, l'historique indique si cette hypothese fixe etait juste, fausse ou neutre.
+La section "Hypotheses de confiance" separe le signal live, recalcule en continu, et le repere d'ouverture fixe, recalcule a chaque debut d'heure. L'hypothese live affiche aussi une cote indicative interne basee sur la confiance du modele. Quand l'heure se termine, l'historique indique si cette hypothese fixe etait juste, fausse ou neutre.
 
 La section "Modele cloture horaire" est specialisee pour les creneaux 1h : elle compare la cloture estimee de l'heure avec le prix d'ouverture de cette meme heure.
 
 La section "Supervision du moteur" rejoue les dernieres heures disponibles, mesure les signaux justes/faux/neutres et ajuste la confiance affichee selon la fiabilite recente.
+
+La section "Base d'etude horaire" peut se connecter a Supabase. Un collecteur planifie y capture l'estimation fixe, clot chaque observation et conserve toutes les heures meme lorsque l'application est fermee. Les predictions reelles `live` restent separees des reconstitutions `replay`.
+
+Voir `SUPABASE_SETUP.md` pour activer cette memoire persistante.
 
 ## Partage et publicite
 

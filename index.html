@@ -109,19 +109,19 @@
         <small>prix BTC actuel</small>
       </article>
       <article class="stat">
-        <span>Objectif estime</span>
+        <span>Cap live</span>
         <strong id="forecastValue">--</strong>
-        <small id="forecastContext">Horizon 1h</small>
+        <small id="forecastContext">Recalculee en continu</small>
       </article>
       <article class="stat">
-        <span>Difference</span>
+        <span>Repere d'ouverture</span>
+        <strong id="fixedTargetValue">--</strong>
+        <small id="fixedTargetContext">Capture au debut de l'heure</small>
+      </article>
+      <article class="stat">
+        <span>Ecart live</span>
         <strong id="deltaValue">--</strong>
         <small id="deltaContext">vs maintenant</small>
-      </article>
-      <article class="stat">
-        <span>Confiance live</span>
-        <strong id="confidenceValue">--</strong>
-        <small id="confidenceContext">Force du signal</small>
       </article>
     </section>
 
@@ -129,12 +129,12 @@
       <summary>Comparer les deux hypotheses</summary>
       <section class="hypothesis-grid" aria-label="Hypotheses de confiance">
         <article class="hypothesis-card" id="liveHypothesisCard">
-          <span>Live</span>
+          <span>Hypothese live</span>
           <strong id="liveHypothesisValue">--</strong>
           <small id="liveHypothesisContext">Recalcule en continu.</small>
         </article>
         <article class="hypothesis-card" id="fixedHypothesisCard">
-          <span>Fixe pour cette heure</span>
+          <span>Repere d'ouverture</span>
           <strong id="fixedHypothesisValue">--</strong>
           <small id="fixedHypothesisContext">Capture une fois par heure.</small>
         </article>
@@ -144,8 +144,8 @@
     <section class="panel compact hourly-model-panel">
       <div class="panel-head">
         <div>
-          <h2>Modele cloture horaire</h2>
-          <p>Lecture specialisee pour savoir si l'heure courante a plus de chances de finir au-dessus ou sous son ouverture.</p>
+          <h2>Estimation fixe de l'heure</h2>
+          <p>Prediction capturee a l'ouverture puis conservee sans modification jusqu'a la cloture.</p>
         </div>
       </div>
       <div class="hourly-close-grid">
@@ -241,6 +241,20 @@
       <div class="supervision-grid" id="modelSupervision"></div>
     </details>
 
+    <details class="panel compact study-database-panel" open>
+      <summary>Base d'etude horaire</summary>
+      <div class="panel-head">
+        <div>
+          <h2>Memoire du modele fixe</h2>
+          <p>Chaque heure est enregistree, classee et conservee pour mesurer puis perfectionner l'estimation d'ouverture.</p>
+        </div>
+        <span class="database-status" id="databaseStatus">Mode local</span>
+      </div>
+      <div class="study-database" id="studyDatabase">
+        <div class="supervision-empty">Connexion a la base d'etude en attente.</div>
+      </div>
+    </details>
+
     <details class="panel compact">
       <summary>Activite technique</summary>
       <div id="logBox" class="log-box"></div>
@@ -261,6 +275,7 @@
     </div>
   </section>
 
+  <script src="config.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

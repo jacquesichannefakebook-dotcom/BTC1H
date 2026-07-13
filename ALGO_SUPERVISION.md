@@ -62,6 +62,8 @@ Comparer les anciennes predictions fixes avec les clotures reelles :
 
 Statut : premiere version implementee sur les dernieres heures disponibles. Le moteur rejoue un signal au debut des heures passees, compare la direction avec la cloture horaire, puis affiche reussite recente, neutres et erreur moyenne.
 
+Evolution persistante : une base Supabase enregistre maintenant le repere fixe, sa version de modele, ses facteurs, la cloture reelle et son verdict. Les observations `live`, produites avant le resultat, sont separees des observations `replay` reconstituees. Le backtest local reste disponible comme secours et utilise desormais le meme modele specialise de cloture que le repere fixe.
+
 ### 4. Calibration de confiance
 
 La confiance ne doit pas seulement mesurer la force du signal. Elle doit aussi etre ajustee par la performance recente du modele.
@@ -72,7 +74,7 @@ Exemple :
 - signal fort + modele recent mauvais = confiance reduite ;
 - signal faible = neutre.
 
-Statut : premiere calibration implementee. La confiance live est maintenant reduite ou renforcee legerement selon le backtest horaire recent.
+Statut : premiere calibration implementee. La confiance live est maintenant reduite ou renforcee legerement selon le backtest horaire recent. Le collecteur distant peut utiliser jusqu'aux 500 derniers verdicts, en privilegiant les observations `live` des que leur echantillon devient suffisant.
 
 ### 5. Donnees supplementaires futures
 

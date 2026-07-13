@@ -3,8 +3,13 @@ const state = {
   liveTimer: null,
   market: null,
   quotaTimer: null,
-  quotaLocked: false
+  quotaLocked: false,
+  studyObservations: [],
+  studySummary: null,
+  lastStudyFetch: 0
 };
+
+const remoteConfig = window.BTC1H_CONFIG || {};
 
 const QUOTA_BASE_MS = 2 * 60 * 60 * 1000;
 const QUOTA_REWARD_MS = 2 * 60 * 60 * 1000;
@@ -36,10 +41,10 @@ const els = {
   spotValue: document.getElementById("spotValue"),
   forecastValue: document.getElementById("forecastValue"),
   forecastContext: document.getElementById("forecastContext"),
+  fixedTargetValue: document.getElementById("fixedTargetValue"),
+  fixedTargetContext: document.getElementById("fixedTargetContext"),
   deltaValue: document.getElementById("deltaValue"),
   deltaContext: document.getElementById("deltaContext"),
-  confidenceValue: document.getElementById("confidenceValue"),
-  confidenceContext: document.getElementById("confidenceContext"),
   liveHypothesisCard: document.getElementById("liveHypothesisCard"),
   liveHypothesisValue: document.getElementById("liveHypothesisValue"),
   liveHypothesisContext: document.getElementById("liveHypothesisContext"),
@@ -57,6 +62,8 @@ const els = {
   studyList: document.getElementById("studyList"),
   hourHistory: document.getElementById("hourHistory"),
   modelSupervision: document.getElementById("modelSupervision"),
+  studyDatabase: document.getElementById("studyDatabase"),
+  databaseStatus: document.getElementById("databaseStatus"),
   marketQuestion: document.getElementById("marketQuestion"),
   logBox: document.getElementById("logBox")
 };
@@ -123,6 +130,7 @@ async function fetchBinanceCandles() {
   }));
   setStatus(`BTC actualise: ${new Date().toLocaleTimeString("fr-FR")}`);
   analyze();
+  refreshStudyDatabase().catch(() => null);
 }
 
 async function loadMarketFromUrl() {
@@ -207,13 +215,26 @@ function analyze() {
   const backtest = buildHourlyBacktest(state.candles, settings, 12);
   const confidence = calibrateConfidence(rawConfidence, backtest, direction);
   const hourlyClose = buildHourlyCloseModel(state.candles, model, spot, settings, backtest);
+  const remoteReference = buildRemoteOpeningReference(state.candles, spot);
+  const hourlyReference = remoteReference || buildOpeningHourReference(state.candles, settings, backtest) || hourlyClose;
   const slotForecasts = buildSlotForecasts(spot, model, settings);
-  const hourlyHypothesis = updateHourlyHypothesis({ spot, confidence, direction, slotForecasts, hourlyClose });
+  const hourlyHypothesis = remoteReference
+    ? {
+        bucket: remoteReference.bucket,
+        capturedAt: remoteReference.capturedAt,
+        startPrice: remoteReference.open,
+        forecastPrice: remoteReference.closePrice,
+        forecastDelta: remoteReference.closePrice - remoteReference.open,
+        direction: remoteReference.direction,
+        confidence: remoteReference.confidence,
+        model: `remote-${remoteReference.modelVersion}`
+      }
+    : updateHourlyHypothesis({ spot, confidence, direction, slotForecasts, hourlyClose: hourlyReference });
 
-  renderMetrics({ spot, forecast, delta, deltaPct, confidence, direction, settings, model });
-  renderPlainSummary({ spot, forecast, delta, deltaPct, confidence, direction, settings, model, slotForecasts, hourlyClose });
-  renderHypotheses({ spot, forecast, delta, confidence, direction, slotForecasts, hourlyHypothesis, hourlyClose });
-  renderHourlyCloseModel(hourlyClose);
+  renderMetrics({ spot, forecast, delta, deltaPct, confidence, direction, settings, model, hourlyHypothesis });
+  renderPlainSummary({ spot, forecast, delta, deltaPct, confidence, direction, settings, model, slotForecasts, hourlyClose: hourlyReference });
+  renderHypotheses({ spot, forecast, delta, confidence, direction, slotForecasts, hourlyHypothesis, hourlyClose, hourlyReference });
+  renderHourlyCloseModel(hourlyReference);
   renderSignals({ direction, confidence, settings, model });
   renderSlots({ spot, model, settings, slotForecasts });
   renderStudyNotes({ spot, forecast, delta, direction, confidence, settings, model, slotForecasts });
@@ -312,23 +333,28 @@ function buildModel(candles, closes, returns, settings, includeSeries = true) {
 }
 
 function buildHourlyBacktest(candles, settings, limit) {
-  const completedHours = buildHourlyHistory(candles, Math.max(limit + 2, 14)).reverse();
+  const completedHours = buildHourlyHistory(candles, limit).reverse();
   const rows = [];
   completedHours.forEach((hour) => {
-    if (rows.length >= limit) return;
     const openIndex = candles.findIndex((candle) => candle.time >= hour.bucket);
     if (openIndex < 240) return;
-    const priorCandles = candles.slice(0, openIndex);
-    const closes = priorCandles.map((candle) => candle.close);
+    const openingCandle = candles[openIndex];
+    const referenceCandles = candles.slice(0, openIndex + 1);
+    referenceCandles[referenceCandles.length - 1] = {
+      ...openingCandle,
+      high: hour.open,
+      low: hour.open,
+      close: hour.open
+    };
+    const closes = referenceCandles.map((candle) => candle.close);
     const returns = closes.slice(1).map((close, index) => Math.log(close / closes[index]));
     const hourlySettings = { ...settings, horizon: 60 };
-    const model = buildModel(priorCandles, closes, returns, hourlySettings, false);
-    const projectedReturn = model.projectedReturn;
-    const forecast = hour.open * Math.exp(projectedReturn);
-    const strength = Math.abs(projectedReturn) / Math.max(model.noise * settings.sensitivity, 0.000001);
-    const predicted = strength < NEUTRAL_STRENGTH_THRESHOLD ? "~" : forecast >= hour.open ? "+" : "-";
+    const model = buildModel(referenceCandles, closes, returns, hourlySettings, false);
+    const replay = buildHourlyCloseModel(referenceCandles, model, hour.open, hourlySettings, null);
+    const forecast = replay.closePrice;
+    const predicted = replay.direction;
     const actual = hour.close >= hour.open ? "+" : "-";
-    const confidence = clamp((strength / 2) * model.regime.confidenceMultiplier, 0.05, 0.99);
+    const confidence = replay.confidence;
     rows.push({
       bucket: hour.bucket,
       predicted,
@@ -373,7 +399,8 @@ function buildHourlyCloseModel(candles, model, spot, settings, backtest) {
   const remaining = Math.max(0, 60 - elapsed);
   const hourNoise = Math.max(model.vol1m * Math.sqrt(60), 0.000001);
   const distanceFromOpen = spot / open - 1;
-  const rangePosition = (spot - low) / Math.max(high - low, 0.000001);
+  const hourRange = high - low;
+  const rangePosition = hourRange < 0.000001 ? 0.5 : (spot - low) / hourRange;
   const completed = buildHourlyHistory(candles, 10);
   const recentBias = completed.length
     ? mean(completed.slice(0, 8).map((hour) => (hour.direction === "+" ? 1 : -1) * clamp(Math.abs(hour.deltaPct) / Math.max(hourNoise, 0.000001), 0, 1)))
@@ -428,6 +455,64 @@ function buildHourlyCloseModel(candles, model, spot, settings, backtest) {
       { label: "Position range", value: `${Math.round(rangePosition * 100)}%` },
       { label: "Biais dernieres heures", value: formatScore(recentBias) },
       { label: "Fiabilite recente", value: !backtest || backtest.accuracy === null ? "--" : `${Math.round(backtest.accuracy * 100)}%` }
+    ]
+  };
+}
+
+function buildOpeningHourReference(candles, settings, backtest) {
+  const bucket = hourStart(candles.at(-1).time);
+  const openIndex = candles.findIndex((candle) => candle.time >= bucket);
+  if (openIndex < 240) return null;
+  const openingCandle = candles[openIndex];
+  const open = openingCandle.open;
+  const referenceCandles = candles.slice(0, openIndex + 1);
+  referenceCandles[referenceCandles.length - 1] = {
+    ...openingCandle,
+    high: open,
+    low: open,
+    close: open
+  };
+  const closes = referenceCandles.map((candle) => candle.close);
+  const returns = closes.slice(1).map((close, index) => Math.log(close / closes[index]));
+  const hourlySettings = { ...settings, horizon: 60 };
+  const openingModel = buildModel(referenceCandles, closes, returns, hourlySettings, false);
+  const reference = buildHourlyCloseModel(referenceCandles, openingModel, open, hourlySettings, backtest);
+  return {
+    ...reference,
+    capturedAt: bucket,
+    isOpeningReference: true
+  };
+}
+
+function buildRemoteOpeningReference(candles, spot) {
+  if (!state.studyObservations.length) return null;
+  const bucket = hourStart(candles.at(-1).time);
+  const row = state.studyObservations.find((observation) => Date.parse(observation.hour_open) === bucket);
+  if (!row) return null;
+  const currentHour = candles.filter((candle) => candle.time >= bucket);
+  const high = Math.max(...currentHour.map((candle) => candle.high), spot);
+  const low = Math.min(...currentHour.map((candle) => candle.low), spot);
+  return {
+    bucket,
+    capturedAt: Date.parse(row.hour_open),
+    isOpeningReference: true,
+    isRemoteReference: true,
+    modelVersion: row.model_version,
+    open: Number(row.opening_price),
+    spot,
+    high,
+    low,
+    elapsed: currentHour.length,
+    remaining: Math.max(0, 60 - currentHour.length),
+    closePrice: Number(row.predicted_close),
+    direction: row.predicted_direction,
+    confidence: Number(row.calibrated_confidence),
+    edgeFromOpen: Number(row.predicted_close) / Number(row.opening_price) - 1,
+    factors: [
+      { label: "Source fixe", value: "Base persistante" },
+      { label: "Version modele", value: row.model_version },
+      { label: "Regime ouverture", value: row.regime },
+      { label: "Origine", value: row.prediction_origin === "live" ? "Prediction reelle" : "Rejeu historique" }
     ]
   };
 }
@@ -567,16 +652,17 @@ function updateHourlyHypothesis(result) {
   const hypotheses = readHourlyHypotheses();
   const finHour = result.slotForecasts.find((slot) => slot.label === "Fin heure courante");
   const closeModel = result.hourlyClose;
-  if (!hypotheses[key] && (closeModel || finHour)) {
+  const shouldCapture = !hypotheses[key] || (closeModel?.isOpeningReference && hypotheses[key].model !== "opening-reference");
+  if (shouldCapture && (closeModel || finHour)) {
     hypotheses[key] = {
       bucket,
-      capturedAt: now,
-      startPrice: result.spot,
+      capturedAt: closeModel?.capturedAt || now,
+      startPrice: closeModel ? closeModel.open : result.spot,
       forecastPrice: closeModel ? closeModel.closePrice : finHour.price,
       forecastDelta: closeModel ? closeModel.closePrice - closeModel.open : finHour.delta,
       direction: closeModel ? closeModel.direction : finHour.direction,
       confidence: closeModel ? closeModel.confidence : result.confidence,
-      model: closeModel ? "hourly-close" : "live-projection"
+      model: closeModel?.isOpeningReference ? "opening-reference" : closeModel ? "hourly-close" : "live-projection"
     };
     pruneHourlyHypotheses(hypotheses);
     writeHourlyHypotheses(hypotheses);
@@ -648,11 +734,17 @@ function renderMetrics(result) {
   els.directionContext.textContent = `${fmtDelta.format(result.delta)} estime sur ${result.settings.horizon} min. Regime ${result.model.regime.label}.`;
   els.spotValue.textContent = fmtUsd.format(result.spot);
   els.forecastValue.textContent = fmtUsd.format(result.forecast);
-  els.forecastContext.textContent = `Projection ${result.settings.horizon} min`;
+  els.forecastContext.textContent = `Confiance variable ${Math.round(result.confidence * 100)}% | horizon ${result.settings.horizon} min`;
+  if (result.hourlyHypothesis) {
+    const fixedDelta = result.hourlyHypothesis.forecastPrice - result.hourlyHypothesis.startPrice;
+    els.fixedTargetValue.textContent = fmtUsd.format(result.hourlyHypothesis.forecastPrice);
+    els.fixedTargetContext.textContent = `Confiance fixe ${Math.round(result.hourlyHypothesis.confidence * 100)}% | ${fmtDelta.format(fixedDelta)} depuis ouverture`;
+  } else {
+    els.fixedTargetValue.textContent = "--";
+    els.fixedTargetContext.textContent = "Repere calcule au debut de l'heure";
+  }
   els.deltaValue.textContent = fmtDelta.format(result.delta);
   els.deltaContext.textContent = fmtPct.format(result.deltaPct);
-  els.confidenceValue.textContent = `${Math.round(result.confidence * 100)}%`;
-  els.confidenceContext.textContent = result.confidence > 0.65 ? "Signal fort" : result.confidence > 0.35 ? "Signal moyen" : "Signal faible";
   els.chartBadge.textContent = timeToNextHourLabel(new Date());
 }
 
@@ -681,7 +773,7 @@ function renderPlainSummary(result) {
 function renderHypotheses(result) {
   els.liveHypothesisCard.className = `hypothesis-card ${directionClass(result.direction)}`;
   els.liveHypothesisValue.textContent = `${result.direction} ${Math.round(result.confidence * 100)}%`;
-  els.liveHypothesisContext.textContent = `Ce que le modele pense maintenant: ${fmtUsd.format(result.forecast)} (${fmtDelta.format(result.delta)}).`;
+  els.liveHypothesisContext.textContent = `Cap live ${fmtUsd.format(result.forecast)} (${fmtDelta.format(result.delta)}). Cote indicative ${formatDecimalOdds(result.confidence, result.direction)}.`;
 
   const fixed = result.hourlyHypothesis;
   if (!fixed) {
@@ -692,7 +784,12 @@ function renderHypotheses(result) {
   }
   els.fixedHypothesisCard.className = `hypothesis-card ${directionClass(fixed.direction)}`;
   els.fixedHypothesisValue.textContent = `${fixed.direction} ${Math.round(fixed.confidence * 100)}%`;
-  els.fixedHypothesisContext.textContent = `Prediction gardee pour juger l'heure: capture ${fmtTime.format(new Date(fixed.capturedAt))}, cloture estimee ${fmtUsd.format(fixed.forecastPrice)}.`;
+  els.fixedHypothesisContext.textContent = `Repere garde pour juger l'heure: ouverture ${fmtTime.format(new Date(fixed.capturedAt))}, cloture estimee ${fmtUsd.format(fixed.forecastPrice)}.`;
+}
+
+function formatDecimalOdds(confidence, direction) {
+  if (direction === "~" || confidence <= 0) return "--";
+  return `x${(1 / clamp(confidence, 0.05, 0.95)).toFixed(2)}`;
 }
 
 function renderHourlyCloseModel(hourlyClose) {
@@ -822,6 +919,149 @@ function renderStudyNotes(result) {
     node.innerHTML = `<strong>${note.title}</strong><small>${note.text}</small>`;
     els.studyList.appendChild(node);
   });
+}
+
+async function refreshStudyDatabase(force = false) {
+  if (!els.studyDatabase || !els.databaseStatus) return;
+  const url = String(remoteConfig.supabaseUrl || "").replace(/\/$/, "");
+  const key = String(remoteConfig.supabaseAnonKey || "");
+  if (!url || !key) {
+    els.databaseStatus.textContent = "Configuration requise";
+    els.databaseStatus.className = "database-status is-local";
+    renderStudyDatabase([]);
+    return;
+  }
+  if (!force && state.studyObservations.length && Date.now() - state.lastStudyFetch < 60000) return;
+  els.databaseStatus.textContent = "Synchronisation...";
+  els.databaseStatus.className = "database-status is-syncing";
+  const fields = [
+    "hour_open", "prediction_origin", "model_version", "opening_price", "predicted_close",
+    "predicted_direction", "calibrated_confidence", "regime", "actual_close",
+    "actual_direction", "verdict", "absolute_error_pct"
+  ].join(",");
+  const requestHeaders = { apikey: key };
+  if (key.startsWith("eyJ")) {
+    requestHeaders.Authorization = `Bearer ${key}`;
+  }
+  const [response, summaryResponse] = await Promise.all([
+    fetch(`${url}/rest/v1/hourly_observations?select=${fields}&order=hour_open.desc&limit=1000`, { headers: requestHeaders }),
+    fetch(`${url}/rest/v1/hourly_study_overview?select=*`, { headers: requestHeaders })
+  ]);
+  if (!response.ok || !summaryResponse.ok) {
+    const status = !response.ok ? response.status : summaryResponse.status;
+    els.databaseStatus.textContent = `Base indisponible (${status})`;
+    els.databaseStatus.className = "database-status is-error";
+    throw new Error(`Base d'etude: ${status}`);
+  }
+  state.studyObservations = await response.json();
+  state.studySummary = (await summaryResponse.json())[0] || null;
+  state.lastStudyFetch = Date.now();
+  const total = Number(state.studySummary?.total) || state.studyObservations.length;
+  els.databaseStatus.textContent = `Connectee · ${total} h memorisees`;
+  els.databaseStatus.className = "database-status is-connected";
+  renderStudyDatabase(state.studyObservations, state.studySummary);
+  if (state.candles.length >= 240) analyze();
+}
+
+function observationAccuracy(rows) {
+  const judged = rows.filter((row) => row.verdict === "correct" || row.verdict === "wrong");
+  if (!judged.length) return null;
+  return judged.filter((row) => row.verdict === "correct").length / judged.length;
+}
+
+function studyBar(label, rows) {
+  const judged = rows.filter((row) => row.verdict === "correct" || row.verdict === "wrong");
+  const accuracy = observationAccuracy(rows);
+  const width = accuracy === null ? 0 : Math.round(accuracy * 100);
+  return `
+    <article class="study-band">
+      <div><span>${label}</span><strong>${accuracy === null ? "--" : `${width}%`}</strong></div>
+      <div class="study-band-track"><i style="width:${width}%"></i></div>
+      <small>${judged.length} decisions tranchees</small>
+    </article>
+  `;
+}
+
+function renderStudyDatabase(rows, summary = null) {
+  if (!els.studyDatabase) return;
+  if (!remoteConfig.supabaseUrl || !remoteConfig.supabaseAnonKey) {
+    els.studyDatabase.innerHTML = `
+      <div class="database-empty">
+        <strong>Le moteur distant est pret a etre branche.</strong>
+        <span>Renseigne l'URL et la cle publique Supabase dans config.js. Le mode live BTC continue normalement pendant ce temps.</span>
+      </div>
+    `;
+    return;
+  }
+  if (!rows.length) {
+    els.studyDatabase.innerHTML = '<div class="supervision-empty">Base connectee. La premiere observation apparaitra au prochain passage du collecteur.</div>';
+    return;
+  }
+
+  const judged = rows.filter((row) => row.verdict === "correct" || row.verdict === "wrong");
+  const live = rows.filter((row) => row.prediction_origin === "live");
+  const replay = rows.filter((row) => row.prediction_origin === "replay");
+  const neutral = rows.filter((row) => row.verdict === "neutral");
+  const pending = rows.filter((row) => row.verdict === "pending");
+  const totalCount = Number(summary?.total) || rows.length;
+  const liveCount = Number(summary?.live_total) || live.length;
+  const replayCount = Number(summary?.replay_total) || replay.length;
+  const judgedCount = Number(summary?.judged_total) || judged.length;
+  const winsCount = Number(summary?.wins_total) || judged.filter((row) => row.verdict === "correct").length;
+  const liveJudgedCount = Number(summary?.live_judged_total) || live.filter((row) => row.verdict === "correct" || row.verdict === "wrong").length;
+  const liveWinsCount = Number(summary?.live_wins_total) || live.filter((row) => row.verdict === "correct").length;
+  const neutralCount = Number(summary?.neutral_total) || neutral.length;
+  const pendingCount = Number(summary?.pending_total) || pending.length;
+  const accuracy = judgedCount ? winsCount / judgedCount : null;
+  const liveAccuracy = liveJudgedCount ? liveWinsCount / liveJudgedCount : null;
+  const averageError = summary?.average_error_pct === null || summary?.average_error_pct === undefined
+    ? (judged.length ? mean(judged.map((row) => Number(row.absolute_error_pct) || 0)) : null)
+    : Number(summary.average_error_pct);
+  const last24Count = Number(summary?.last_24h_total) || rows.filter((row) => Date.parse(row.hour_open) >= Date.now() - 24 * 3600000).length;
+
+  const regimes = ["directionnel", "volatil", "calme", "neutre"]
+    .map((regime) => studyBar(`Regime ${regime}`, rows.filter((row) => row.regime === regime)))
+    .join("");
+  const confidenceBands = [
+    { label: "Confiance < 35%", min: 0, max: 0.35 },
+    { label: "Confiance 35-55%", min: 0.35, max: 0.55 },
+    { label: "Confiance 55-75%", min: 0.55, max: 0.75 },
+    { label: "Confiance > 75%", min: 0.75, max: 1.01 }
+  ].map((band) => studyBar(
+    band.label,
+    rows.filter((row) => Number(row.calibrated_confidence) >= band.min && Number(row.calibrated_confidence) < band.max)
+  )).join("");
+
+  const timeline = rows.slice(0, 18).map((row) => {
+    const date = new Date(row.hour_open);
+    const verdictLabel = row.verdict === "correct" ? "juste" : row.verdict === "wrong" ? "faux" : row.verdict === "neutral" ? "neutre" : "en cours";
+    return `
+      <article class="study-timeline-item ${directionClass(row.predicted_direction)} verdict-${row.verdict}">
+        <span>${date.toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit" })} · ${fmtTime.format(date)}</span>
+        <strong>${row.predicted_direction} ${Math.round(Number(row.calibrated_confidence) * 100)}%</strong>
+        <small>${verdictLabel} · ${row.prediction_origin === "live" ? "reel" : "rejeu"} · ${row.regime}</small>
+      </article>
+    `;
+  }).join("");
+
+  els.studyDatabase.innerHTML = `
+    <section class="study-kpis">
+      <article><span>Heures memorisees</span><strong>${totalCount}</strong><small>${liveCount} reelles · ${replayCount} rejouees</small></article>
+      <article><span>Reussite globale</span><strong>${accuracy === null ? "--" : `${Math.round(accuracy * 100)}%`}</strong><small>${judgedCount} decisions tranchees</small></article>
+      <article><span>Reussite live</span><strong>${liveAccuracy === null ? "--" : `${Math.round(liveAccuracy * 100)}%`}</strong><small>predictions faites avant le resultat</small></article>
+      <article><span>Erreur prix moyenne</span><strong>${averageError === null ? "--" : fmtPct.format(averageError)}</strong><small>projection fixe contre cloture</small></article>
+      <article><span>Dernieres 24 h</span><strong>${last24Count}</strong><small>observations disponibles</small></article>
+      <article><span>Etats non tranches</span><strong>${neutralCount + pendingCount}</strong><small>${neutralCount} neutres · ${pendingCount} en cours</small></article>
+    </section>
+    <section class="study-breakdowns">
+      <div><h3>Precision par regime</h3>${regimes}</div>
+      <div><h3>Calibration par confiance</h3>${confidenceBands}</div>
+    </section>
+    <section class="study-timeline-wrap">
+      <h3>Dernieres estimations fixes</h3>
+      <div class="study-timeline">${timeline}</div>
+    </section>
+  `;
 }
 
 function renderSupervision(result) {
@@ -1234,4 +1474,5 @@ function showError(error) {
 bindEvents();
 startQuotaTimer();
 restartLiveTimer();
+refreshStudyDatabase(true).catch(() => null);
 fetchBinanceCandles().catch(showError);
