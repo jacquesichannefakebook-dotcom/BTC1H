@@ -7,7 +7,7 @@
   <meta name="description" content="BTC1H analyse le Bitcoin en temps reel avec momentum, volatilite, EMA, MACD, RSI, volume, creneaux horaires et historique horaire.">
   <meta name="theme-color" content="#101312">
   <meta property="og:title" content="BTC1H">
-  <meta property="og:description" content="Lecture directionnelle BTC en temps reel, avec signal + / - / ~, graphiques, creneaux et historique horaire.">
+  <meta property="og:description" content="Lecture directionnelle BTC en temps reel, avec orientation + ou -, confiance, rentabilite et historique horaire.">
   <meta property="og:type" content="website">
   <meta property="og:image" content="icon.svg">
   <meta name="twitter:card" content="summary">
@@ -149,17 +149,17 @@
     <section class="decision-layout">
       <section class="hero-signal" id="signalCard" aria-label="Signal principal">
         <div>
-          <span>Decision apres prix et frais</span>
+          <span>Direction estimee</span>
           <strong id="directionValue">--</strong>
         </div>
         <div class="hero-details">
           <span id="directionText">En attente des donnees BTC.</span>
-          <small id="directionContext">Aucun pari n'est propose sans avantage estime apres couts.</small>
+          <small id="directionContext">La direction et la decision de jouer seront affichees separement.</small>
         </div>
       </section>
 
       <section class="clarity-card" aria-label="Resume lisible">
-        <h2>A retenir</h2>
+        <h2>Cette heure</h2>
         <div id="plainSummary" class="plain-summary">Chargement de l'analyse...</div>
       </section>
     </section>
@@ -188,7 +188,7 @@
     </section>
 
     <details class="panel compact">
-      <summary>Comparer les deux hypotheses</summary>
+      <summary>Comparer les reperes</summary>
       <section class="hypothesis-grid" aria-label="Hypotheses de confiance">
         <article class="hypothesis-card" id="liveHypothesisCard">
           <span>Hypothese live</span>
@@ -206,8 +206,8 @@
     <section class="panel compact hourly-model-panel">
       <div class="panel-head">
         <div>
-          <h2>Estimation fixe de l'heure</h2>
-          <p>Prediction capturee a l'ouverture puis conservee sans modification jusqu'a la cloture.</p>
+          <h2>Prevision principale de l'heure</h2>
+          <p>Direction, confiance et objectif fixes a l'ouverture, puis compares au resultat reel.</p>
         </div>
       </div>
       <div class="hourly-close-grid">
@@ -292,7 +292,7 @@
       <div class="hour-history" id="hourHistory"></div>
     </details>
 
-    <details class="panel compact" open>
+    <details class="panel compact">
       <summary>Supervision du moteur</summary>
       <div class="panel-head">
         <div>
@@ -304,11 +304,11 @@
     </details>
 
     <details class="panel compact study-database-panel" open>
-      <summary>Base d'etude horaire</summary>
+      <summary>Analyses heure par heure</summary>
       <div class="panel-head">
         <div>
-          <h2>Memoire du modele fixe</h2>
-          <p>Chaque heure est enregistree, classee et conservee pour mesurer puis perfectionner l'estimation d'ouverture.</p>
+          <h2>Bilan des heures etudiees</h2>
+          <p>Decisions prises, heures sans mise, resultats et comparaison precise entre prevision et cloture.</p>
         </div>
         <span class="database-status" id="databaseStatus">Mode local</span>
       </div>

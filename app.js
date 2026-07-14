@@ -120,6 +120,11 @@ const fmtPct = new Intl.NumberFormat("fr-FR", {
   signDisplay: "always"
 });
 
+const fmtAbsPct = new Intl.NumberFormat("fr-FR", {
+  style: "percent",
+  maximumFractionDigits: 2
+});
+
 const fmtTime = new Intl.DateTimeFormat("fr-FR", {
   hour: "2-digit",
   minute: "2-digit"
@@ -156,6 +161,39 @@ function authConfig() {
 function setAuthStatus(message, mode = "") {
   els.authStatus.textContent = message;
   els.authStatus.className = `auth-status${mode ? ` is-${mode}` : ""}`;
+}
+
+function friendlyAuthError(error, context = "login") {
+  const message = String(error?.message || error || "").trim();
+  const normalized = message.toLowerCase();
+  if (normalized.includes("rate limit") || normalized.includes("too many requests") || normalized.includes("429")) {
+    return "Trop de demandes ont ete envoyees en peu de temps. Attends quelques minutes avant de reessayer. Si la confirmation par e-mail est activee, la limite concerne l'envoi des e-mails Supabase, pas le nombre de comptes autorises.";
+  }
+  if (normalized.includes("already registered") || normalized.includes("already exists") || normalized.includes("user already")) {
+    return "Un compte existe deja avec cette adresse e-mail. Utilise Connexion ou choisis une autre adresse.";
+  }
+  if (normalized.includes("email not confirmed")) {
+    return "Cette adresse e-mail n'est pas encore confirmee. Ouvre l'e-mail recu, puis reviens te connecter.";
+  }
+  if (normalized.includes("invalid login credentials")) {
+    return "Adresse e-mail ou mot de passe incorrect.";
+  }
+  if (normalized.includes("password") && (normalized.includes("weak") || normalized.includes("least") || normalized.includes("characters"))) {
+    return "Le mot de passe doit contenir au moins 8 caracteres et ne pas etre trop facile a deviner.";
+  }
+  if (normalized.includes("invalid") && normalized.includes("email")) {
+    return "L'adresse e-mail n'est pas valide.";
+  }
+  if (normalized.includes("signup") && (normalized.includes("disabled") || normalized.includes("not allowed"))) {
+    return "La creation de comptes est desactivee dans Supabase. Active les inscriptions par e-mail dans Authentication > Providers > Email.";
+  }
+  if (normalized.includes("failed to fetch") || normalized.includes("network")) {
+    return "Connexion impossible avec le serveur. Verifie Internet puis reessaie.";
+  }
+  if (context === "signup") {
+    return message ? `Creation du compte impossible : ${message}` : "Creation du compte impossible pour le moment.";
+  }
+  return message || "Connexion impossible pour le moment.";
 }
 
 function setAuthMode(mode) {
@@ -317,6 +355,9 @@ function bindAuthEvents() {
   els.blockedLogoutBtn.addEventListener("click", signOut);
   els.loginForm.addEventListener("submit", async (event) => {
     event.preventDefault();
+    const submitButton = event.currentTarget.querySelector('button[type="submit"]');
+    if (submitButton?.disabled) return;
+    if (submitButton) submitButton.disabled = true;
     setAuthStatus("Connexion...");
     try {
       const data = await authRequest("token?grant_type=password", {
@@ -327,15 +368,20 @@ function bindAuthEvents() {
       if (!session) throw new Error("Session non recue.");
       await authorizeSession(session);
     } catch (error) {
-      setAuthStatus(error.message, "error");
+      setAuthStatus(friendlyAuthError(error, "login"), "error");
+    } finally {
+      if (submitButton) submitButton.disabled = false;
     }
   });
   els.signupForm.addEventListener("submit", async (event) => {
     event.preventDefault();
+    const submitButton = event.currentTarget.querySelector('button[type="submit"]');
+    if (submitButton?.disabled) return;
     if (els.signupPassword.value !== els.signupPasswordConfirm.value) {
       setAuthStatus("Les deux mots de passe sont differents.", "error");
       return;
     }
+    if (submitButton) submitButton.disabled = true;
     setAuthStatus("Creation du compte...");
     try {
       const data = await authRequest("signup", {
@@ -351,7 +397,9 @@ function bindAuthEvents() {
         setAuthStatus("Compte cree. Confirme l'e-mail recu, puis connecte-toi pour attendre l'autorisation.", "success");
       }
     } catch (error) {
-      setAuthStatus(error.message, "error");
+      setAuthStatus(friendlyAuthError(error, "signup"), "error");
+    } finally {
+      if (submitButton) submitButton.disabled = false;
     }
   });
 }
@@ -683,25 +731,52 @@ function marketFeeRate() {
   return Number.isFinite(configured) && configured >= 0 ? configured : enabled ? 0.07 : 0;
 }
 
+function displayDirection(direction, { probabilityUp, value, reference } = {}) {
+  if (direction === "+" || direction === "-") return direction;
+  if (Number.isFinite(Number(probabilityUp))) return Number(probabilityUp) >= 0.5 ? "+" : "-";
+  if (Number.isFinite(Number(value)) && Number.isFinite(Number(reference))) return Number(value) >= Number(reference) ? "+" : "-";
+  return "+";
+}
+
 function buildProfitDecision(hourlyReference) {
   if (!hourlyReference) {
-    return { action: false, status: "waiting-model", label: "ATTENDRE", direction: "~" };
+    return { action: false, status: "waiting-model", label: "--", direction: "~" };
   }
   const probabilityUp = Number(hourlyReference.probabilityUp);
   if (!Number.isFinite(probabilityUp)) {
-    return { action: false, status: "legacy-model", label: "ATTENDRE", direction: "~" };
+    const signalDirection = displayDirection(hourlyReference.direction, {
+      value: hourlyReference.closePrice,
+      reference: hourlyReference.open
+    });
+    return {
+      action: false,
+      status: "legacy-model",
+      label: signalDirection,
+      direction: signalDirection,
+      signalDirection,
+      signalProbability: Number(hourlyReference.confidence) || 0.5
+    };
   }
-  const signalDirection = hourlyReference.direction;
-  const signalProbability = signalDirection === "+" ? probabilityUp : signalDirection === "-" ? 1 - probabilityUp : Math.max(probabilityUp, 1 - probabilityUp);
-  if (signalDirection === "~") {
-    return { action: false, status: "neutral", label: "PASSER", direction: "~", signalProbability, probabilityUp };
+  const modelDirection = hourlyReference.direction;
+  const signalDirection = displayDirection(modelDirection, { probabilityUp });
+  const signalProbability = signalDirection === "+" ? probabilityUp : 1 - probabilityUp;
+  if (modelDirection === "~") {
+    return {
+      action: false,
+      status: "neutral",
+      label: signalDirection,
+      direction: signalDirection,
+      signalDirection,
+      signalProbability,
+      probabilityUp
+    };
   }
   if (!state.marketPricing) {
-    return { action: false, status: "missing-market", label: "PRIX ?", direction: "~", signalDirection, signalProbability, probabilityUp };
+    return { action: false, status: "missing-market", label: signalDirection, direction: signalDirection, signalDirection, signalProbability, probabilityUp };
   }
   const quote = state.marketPricing[signalDirection];
   if (!quote || !Number.isFinite(quote.ask)) {
-    return { action: false, status: "missing-price", label: "PASSER", direction: "~", signalDirection, signalProbability, probabilityUp };
+    return { action: false, status: "missing-price", label: signalDirection, direction: signalDirection, signalDirection, signalProbability, probabilityUp };
   }
   const feeRate = marketFeeRate();
   const fee = feeRate * quote.ask * (1 - quote.ask);
@@ -711,8 +786,8 @@ function buildProfitDecision(hourlyReference) {
   return {
     action,
     status: action ? "action" : "no-value",
-    label: action ? (signalDirection === "+" ? "UP" : "DOWN") : "PASSER",
-    direction: action ? signalDirection : "~",
+    label: signalDirection,
+    direction: signalDirection,
     signalDirection,
     signalProbability,
     probabilityUp,
@@ -1216,22 +1291,24 @@ function rsi(closes) {
 function renderMetrics(result) {
   const decision = result.profitDecision;
   els.signalCard.className = `hero-signal ${directionClass(decision.direction)}`;
-  els.directionValue.textContent = decision.label;
+  els.directionValue.textContent = decision.direction === "+" || decision.direction === "-" ? decision.direction : "--";
+  const confidence = Math.round((decision.signalProbability || 0.5) * 100);
+  const directionWord = decision.direction === "+" ? "hausse" : "baisse";
   if (decision.status === "action") {
-    els.directionText.textContent = `Occasion nette : acheter ${decision.outcome}`;
-    els.directionContext.textContent = `Modele ${Math.round(decision.signalProbability * 100)}% | cout avec frais ${formatCents(decision.totalCost)} | avantage ${formatSignedCents(decision.expectedValue)}.`;
+    els.directionText.textContent = `JOUER CETTE HEURE · Acheter ${decision.outcome}`;
+    els.directionContext.textContent = `Direction ${directionWord} · confiance ${confidence}% · cout avec frais ${formatCents(decision.totalCost)} · avantage ${formatSignedCents(decision.expectedValue)}.`;
   } else if (decision.status === "missing-market") {
-    els.directionText.textContent = `Signal ${decision.signalDirection === "+" ? "Up" : "Down"}, prix du marche requis`;
-    els.directionContext.textContent = "Charge le creneau Polymarket : aucune decision d'argent n'est affichee sans prix achetable.";
+    els.directionText.textContent = "NE PAS JOUER · prix du marche manquant";
+    els.directionContext.textContent = `Direction ${directionWord} · confiance ${confidence}%. Charge le creneau Polymarket pour verifier la rentabilite apres frais.`;
   } else if (decision.status === "no-value") {
-    els.directionText.textContent = "Pas d'avantage apres prix et frais";
-    els.directionContext.textContent = `Modele ${Math.round(decision.signalProbability * 100)}% | cout ${formatCents(decision.totalCost)} | avantage ${formatSignedCents(decision.expectedValue)}.`;
+    els.directionText.textContent = "NE PAS JOUER CETTE HEURE";
+    els.directionContext.textContent = `Direction ${directionWord} · confiance ${confidence}% · cout ${formatCents(decision.totalCost)} · avantage net ${formatSignedCents(decision.expectedValue)} insuffisant.`;
   } else if (decision.status === "legacy-model") {
-    els.directionText.textContent = "Ancien repere ignore";
-    els.directionContext.textContent = "Le nouveau modele local prend le relais des que les bougies de l'heure sont disponibles.";
+    els.directionText.textContent = "NE PAS JOUER · repere incomplet";
+    els.directionContext.textContent = `Direction ${directionWord} · confiance ${confidence}%. Le nouveau modele prend le relais des que toutes les donnees sont disponibles.`;
   } else {
-    els.directionText.textContent = "Signal insuffisant : ne pas jouer cette heure";
-    els.directionContext.textContent = `Probabilite la plus haute ${Math.round((decision.signalProbability || 0.5) * 100)}%. Le filtre protege contre les paris sans avantage.`;
+    els.directionText.textContent = "NE PAS JOUER CETTE HEURE";
+    els.directionContext.textContent = `Direction ${directionWord} · confiance ${confidence}%. Une orientation existe, mais elle est trop faible pour risquer de l'argent.`;
   }
   els.spotValue.textContent = fmtUsd.format(result.spot);
   els.forecastValue.textContent = fmtUsd.format(result.forecast);
@@ -1250,37 +1327,30 @@ function renderMetrics(result) {
 }
 
 function renderPlainSummary(result) {
-  const confidenceLabel = result.confidence > 0.65 ? "bonne" : result.confidence > 0.35 ? "moyenne" : "faible";
-  const nextHour = result.slotForecasts.find((slot) => slot.label === "Fin heure courante");
-  const nextText = nextHour
-    ? `Fin d'heure estimee: ${nextHour.direction} vers ${fmtUsd.format(nextHour.price)}.`
-    : "Fin d'heure non disponible.";
-  const hourlyText = result.hourlyClose
-    ? `Modele horaire: ${result.hourlyClose.direction} a ${Math.round(result.hourlyClose.confidence * 100)}%, cloture estimee ${fmtUsd.format(result.hourlyClose.closePrice)} contre ouverture ${fmtUsd.format(result.hourlyClose.open)}.`
-    : "";
-  const caution = !result.profitDecision.action
-    ? "Aucune mise suggeree tant que le filtre de rentabilite n'est pas valide."
-    : result.model.regime.label === "volatil"
-      ? "Marche volatil: l'avantage peut changer vite."
-      : "Occasion detectee, sans garantie de resultat.";
   const decision = result.profitDecision;
+  const liveDirection = displayDirection(result.direction, { value: result.forecast, reference: result.spot });
+  const fixed = result.hourlyClose;
+  const fixedDirection = fixed
+    ? displayDirection(fixed.direction, { probabilityUp: fixed.probabilityUp, value: fixed.closePrice, reference: fixed.open })
+    : null;
+  const confidence = Math.round((decision.signalProbability || 0.5) * 100);
   const decisionText = decision.action
-    ? `<strong>Action ${decision.label}</strong> : avantage net estime ${formatSignedCents(decision.expectedValue)} par part au prix actuel.`
+    ? `<strong class="summary-action is-play">JOUER</strong><span>Avantage net estime ${formatSignedCents(decision.expectedValue)} par part au prix actuel.</span>`
     : decision.status === "missing-market"
-      ? `<strong>Prix manquant</strong> : le signal seul ne suffit pas pour decider d'un pari.`
-      : `<strong>Passer cette heure</strong> : aucun avantage net valide au filtre actuel.`;
+      ? `<strong class="summary-action">NE PAS JOUER</strong><span>Le prix Polymarket est requis pour verifier la rentabilite.</span>`
+      : `<strong class="summary-action">NE PAS JOUER</strong><span>Le filtre ne trouve pas assez d'avantage pour risquer une mise.</span>`;
   els.plainSummary.innerHTML = `
-    <p>${decisionText}</p>
-    <p>Lecture live ${result.direction === "+" ? "haussiere" : result.direction === "-" ? "baissiere" : "neutre"}, confiance ${confidenceLabel}.</p>
-    <p>${nextText}</p>
-    <p>${hourlyText}</p>
-    <p>${caution}</p>
+    <p class="summary-decision">${decisionText}</p>
+    <p><strong>Direction retenue ${decision.direction}</strong><span>Confiance ${confidence}% · ${decision.direction === "+" ? "biais haussier" : "biais baissier"}.</span></p>
+    <p><strong>Lecture en direct ${liveDirection}</strong><span>Objectif ${fmtUsd.format(result.forecast)} · ${fmtDelta.format(result.delta)} depuis maintenant.</span></p>
+    ${fixed ? `<p><strong>Fin d'heure ${fixedDirection}</strong><span>Cloture estimee ${fmtUsd.format(fixed.closePrice)} · ouverture ${fmtUsd.format(fixed.open)}.</span></p>` : ""}
   `;
 }
 
 function renderHypotheses(result) {
-  els.liveHypothesisCard.className = `hypothesis-card ${directionClass(result.direction)}`;
-  els.liveHypothesisValue.textContent = `${result.direction} ${Math.round(result.confidence * 100)}%`;
+  const liveDirection = displayDirection(result.direction, { value: result.forecast, reference: result.spot });
+  els.liveHypothesisCard.className = `hypothesis-card ${directionClass(liveDirection)}`;
+  els.liveHypothesisValue.textContent = `${liveDirection} ${Math.round(result.confidence * 100)}%`;
   els.liveHypothesisContext.textContent = `Cap live ${fmtUsd.format(result.forecast)} (${fmtDelta.format(result.delta)}). Ce signal n'est pas une cote de pari.`;
 
   const fixed = result.hourlyHypothesis;
@@ -1290,15 +1360,21 @@ function renderHypotheses(result) {
     els.fixedHypothesisContext.textContent = "En attente de capture horaire.";
     return;
   }
-  els.fixedHypothesisCard.className = `hypothesis-card ${directionClass(fixed.direction)}`;
-  els.fixedHypothesisValue.textContent = `${fixed.direction} ${Math.round(fixed.confidence * 100)}%`;
+  const fixedDirection = displayDirection(fixed.direction, { value: fixed.forecastPrice, reference: fixed.startPrice });
+  els.fixedHypothesisCard.className = `hypothesis-card ${directionClass(fixedDirection)}`;
+  els.fixedHypothesisValue.textContent = `${fixedDirection} ${Math.round(fixed.confidence * 100)}%`;
   els.fixedHypothesisContext.textContent = `Repere garde pour juger l'heure: ouverture ${fmtTime.format(new Date(fixed.capturedAt))}, cloture estimee ${fmtUsd.format(fixed.forecastPrice)}.`;
 }
 
 function renderHourlyCloseModel(hourlyClose) {
   if (!els.hourlyCloseCard || !hourlyClose) return;
-  els.hourlyCloseCard.className = `hourly-close-main ${directionClass(hourlyClose.direction)}`;
-  els.hourlyCloseValue.textContent = `${hourlyClose.direction} ${Math.round(hourlyClose.confidence * 100)}%`;
+  const direction = displayDirection(hourlyClose.direction, {
+    probabilityUp: hourlyClose.probabilityUp,
+    value: hourlyClose.closePrice,
+    reference: hourlyClose.open
+  });
+  els.hourlyCloseCard.className = `hourly-close-main ${directionClass(direction)}`;
+  els.hourlyCloseValue.textContent = `${direction} ${Math.round(hourlyClose.confidence * 100)}%`;
   els.hourlyCloseContext.textContent = `Ouverture ${fmtUsd.format(hourlyClose.open)} | cloture estimee ${fmtUsd.format(hourlyClose.closePrice)} | ${fmtDelta.format(hourlyClose.closePrice - hourlyClose.open)} vs ouverture.`;
   els.hourlyCloseFactors.innerHTML = "";
   hourlyClose.factors.forEach((factor) => {
@@ -1372,11 +1448,12 @@ function renderSignals(result) {
 function renderSlots(result) {
   els.slotGrid.innerHTML = "";
   result.slotForecasts.forEach((slot) => {
+    const direction = displayDirection(slot.direction, { value: slot.price, reference: result.spot });
     const node = document.createElement("article");
-    node.className = `slot-card ${directionClass(slot.direction)}`;
+    node.className = `slot-card ${directionClass(direction)}`;
     node.innerHTML = `
       <span>${slot.label}</span>
-      <strong>${slot.direction} ${fmtUsd.format(slot.price)}</strong>
+      <strong>${direction} ${fmtUsd.format(slot.price)}</strong>
       <small>${slot.detail} | ${fmtDelta.format(slot.delta)}</small>
     `;
     els.slotGrid.appendChild(node);
@@ -1385,6 +1462,7 @@ function renderSlots(result) {
 
 function renderStudyNotes(result) {
   const model = result.model;
+  const direction = displayDirection(result.direction, { value: result.forecast, reference: result.spot });
   const invalidation = result.direction === "~"
     ? result.spot
     : result.direction === "+"
@@ -1399,12 +1477,12 @@ function renderStudyNotes(result) {
     {
       title: "Point d'invalidation",
       text: result.direction === "~"
-        ? "Pas de biais clair : le moteur attend une meilleure separation entre signal et bruit."
-        : `Le biais ${result.direction} devient fragile autour de ${fmtUsd.format(invalidation)} si le prix s'y installe.`
+        ? `Le biais ${direction} reste faible : ne pas jouer tant que le signal ne se separe pas davantage du bruit.`
+        : `Le biais ${direction} devient fragile autour de ${fmtUsd.format(invalidation)} si le prix s'y installe.`
     },
     {
       title: "Heure suivante",
-      text: nextSlot ? `Projection ${nextSlot.direction} vers ${fmtUsd.format(nextSlot.price)}, soit ${fmtDelta.format(nextSlot.delta)} depuis maintenant.` : "Projection indisponible."
+      text: nextSlot ? `Projection ${displayDirection(nextSlot.direction, { value: nextSlot.price, reference: result.spot })} vers ${fmtUsd.format(nextSlot.price)}, soit ${fmtDelta.format(nextSlot.delta)} depuis maintenant.` : "Projection indisponible."
     },
     {
       title: "Amplitude normale",
@@ -1505,25 +1583,18 @@ function renderStudyDatabase(rows, summary = null) {
   }
 
   const currentModelRows = rows.filter((row) => row.model_version === FIXED_MODEL_VERSION);
-  const judged = currentModelRows.filter((row) => row.verdict === "correct" || row.verdict === "wrong");
   const live = rows.filter((row) => row.prediction_origin === "live");
   const replay = rows.filter((row) => row.prediction_origin === "replay");
   const currentLive = currentModelRows.filter((row) => row.prediction_origin === "live");
-  const neutral = currentModelRows.filter((row) => row.verdict === "neutral");
-  const pending = currentModelRows.filter((row) => row.verdict === "pending");
-  const totalCount = Number(summary?.total) || rows.length;
-  const liveCount = Number(summary?.live_total) || live.length;
-  const replayCount = Number(summary?.replay_total) || replay.length;
-  const judgedCount = judged.length;
+  const realRows = currentLive.length ? currentLive : currentModelRows;
+  const judged = realRows.filter((row) => row.verdict === "correct" || row.verdict === "wrong");
+  const neutral = realRows.filter((row) => row.verdict === "neutral");
+  const pending = realRows.filter((row) => row.verdict === "pending");
+  const completed = realRows.filter((row) => row.actual_close !== null && row.actual_close !== "" && Number.isFinite(Number(row.actual_close)));
   const winsCount = judged.filter((row) => row.verdict === "correct").length;
-  const liveJudgedCount = currentLive.filter((row) => row.verdict === "correct" || row.verdict === "wrong").length;
-  const liveWinsCount = currentLive.filter((row) => row.verdict === "correct").length;
-  const neutralCount = neutral.length;
-  const pendingCount = pending.length;
-  const accuracy = judgedCount ? winsCount / judgedCount : null;
-  const liveAccuracy = liveJudgedCount ? liveWinsCount / liveJudgedCount : null;
-  const averageError = judged.length ? mean(judged.map((row) => Number(row.absolute_error_pct) || 0)) : null;
-  const last24Count = Number(summary?.last_24h_total) || rows.filter((row) => Date.parse(row.hour_open) >= Date.now() - 24 * 3600000).length;
+  const lossesCount = judged.filter((row) => row.verdict === "wrong").length;
+  const accuracy = judged.length ? winsCount / judged.length : null;
+  const averageError = completed.length ? mean(completed.map((row) => Number(row.absolute_error_pct) || 0)) : null;
 
   const regimes = ["directionnel", "volatil", "calme", "neutre"]
     .map((regime) => studyBar(`Regime ${regime}`, currentModelRows.filter((row) => row.regime === regime)))
@@ -1538,35 +1609,69 @@ function renderStudyDatabase(rows, summary = null) {
     currentModelRows.filter((row) => Number(row.calibrated_confidence) >= band.min && Number(row.calibrated_confidence) < band.max)
   )).join("");
 
-  const timeline = rows.slice(0, 18).map((row) => {
+  const timeline = realRows.slice(0, 24).map((row) => {
     const date = new Date(row.hour_open);
-    const verdictLabel = row.verdict === "correct" ? "juste" : row.verdict === "wrong" ? "faux" : row.verdict === "neutral" ? "neutre" : "en cours";
+    const direction = displayDirection(row.predicted_direction, {
+      value: row.predicted_close,
+      reference: row.opening_price
+    });
+    const verdictLabel = row.verdict === "correct"
+      ? "JUSTE"
+      : row.verdict === "wrong"
+        ? "FAUX"
+        : row.verdict === "neutral"
+          ? "SANS MISE"
+          : "EN COURS";
+    const predictedPrice = Number(row.predicted_close);
+    const hasActualPrice = row.actual_close !== null && row.actual_close !== "" && Number.isFinite(Number(row.actual_close));
+    const actualPrice = hasActualPrice ? Number(row.actual_close) : null;
+    const hasError = row.absolute_error_pct !== null && row.absolute_error_pct !== "" && Number.isFinite(Number(row.absolute_error_pct));
+    const priceDetail = hasActualPrice
+      ? `Prevu ${fmtUsd.format(predictedPrice)} · reel ${fmtUsd.format(actualPrice)}`
+      : `Cloture prevue ${fmtUsd.format(predictedPrice)}`;
     return `
-      <article class="study-timeline-item ${directionClass(row.predicted_direction)} verdict-${row.verdict}">
-        <span>${date.toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit" })} · ${fmtTime.format(date)}</span>
-        <strong>${row.predicted_direction} ${Math.round(Number(row.calibrated_confidence) * 100)}%</strong>
-        <small>${verdictLabel} · ${row.prediction_origin === "live" ? "reel" : "rejeu"} · ${row.regime}</small>
+      <article class="study-hour-row ${directionClass(direction)} verdict-${row.verdict}">
+        <div class="study-hour-time">
+          <strong>${fmtTime.format(date)}</strong>
+          <small>${date.toLocaleDateString("fr-FR", { weekday: "short", day: "2-digit", month: "2-digit" })}</small>
+        </div>
+        <div class="study-hour-direction">
+          <strong>${direction}</strong>
+          <span>confiance ${Math.round(Number(row.calibrated_confidence) * 100)}%</span>
+        </div>
+        <div class="study-hour-prices">
+          <span>${priceDetail}</span>
+          <small>${hasError ? `Erreur ${fmtAbsPct.format(Math.abs(Number(row.absolute_error_pct)))}` : `Regime ${row.regime}`}</small>
+        </div>
+        <strong class="study-hour-verdict">${verdictLabel}</strong>
       </article>
     `;
   }).join("");
 
   els.studyDatabase.innerHTML = `
-    <section class="study-kpis">
-      <article><span>Heures memorisees</span><strong>${totalCount}</strong><small>${liveCount} reelles · ${replayCount} rejouees</small></article>
-      <article><span>Reussite v3</span><strong>${accuracy === null ? "--" : `${Math.round(accuracy * 100)}%`}</strong><small>${judgedCount} decisions tranchees</small></article>
-      <article><span>Reussite live v3</span><strong>${liveAccuracy === null ? "--" : `${Math.round(liveAccuracy * 100)}%`}</strong><small>predictions faites avant le resultat</small></article>
-      <article><span>Erreur prix moyenne</span><strong>${averageError === null ? "--" : fmtPct.format(averageError)}</strong><small>projection fixe contre cloture</small></article>
-      <article><span>Dernieres 24 h</span><strong>${last24Count}</strong><small>observations disponibles</small></article>
-      <article><span>Etats non tranches</span><strong>${neutralCount + pendingCount}</strong><small>${neutralCount} neutres · ${pendingCount} en cours</small></article>
+    <section class="study-overview" aria-label="Bilan des analyses horaires">
+      <article><span>Heures observees</span><strong>${realRows.length}</strong><small>predictions faites en conditions reelles</small></article>
+      <article><span>Decisions prises</span><strong>${judged.length}</strong><small>${winsCount} juste${winsCount > 1 ? "s" : ""} · ${lossesCount} fausse${lossesCount > 1 ? "s" : ""}</small></article>
+      <article class="${accuracy !== null && accuracy >= 0.55 ? "is-good" : accuracy === null ? "" : "is-bad"}"><span>Taux de reussite</span><strong>${accuracy === null ? "--" : `${Math.round(accuracy * 100)}%`}</strong><small>uniquement sur les heures jouables</small></article>
+      <article><span>Heures sans mise</span><strong>${neutral.length}</strong><small>direction donnee, risque refuse</small></article>
+      <article><span>Erreur de prix moyenne</span><strong>${averageError === null ? "--" : fmtAbsPct.format(Math.abs(averageError))}</strong><small>objectif compare a la cloture reelle</small></article>
+      <article><span>En cours</span><strong>${pending.length}</strong><small>resultat connu a la fin de l'heure</small></article>
     </section>
-    <section class="study-breakdowns">
-      <div><h3>Precision par regime</h3>${regimes}</div>
-      <div><h3>Calibration par confiance</h3>${confidenceBands}</div>
+    <section class="study-hour-list-wrap">
+      <div class="study-section-head">
+        <div><h3>Detail heure par heure</h3><p>Chaque ligne montre la direction, la confiance, les prix et la decision finale.</p></div>
+        <span>${Math.min(24, realRows.length)} heures affichees</span>
+      </div>
+      <div class="study-hour-list">${timeline}</div>
     </section>
-    <section class="study-timeline-wrap">
-      <h3>Dernieres estimations fixes</h3>
-      <div class="study-timeline">${timeline}</div>
-    </section>
+    <details class="study-technical-details">
+      <summary>Voir les statistiques techniques</summary>
+      <section class="study-breakdowns">
+        <div><h3>Precision par regime</h3>${regimes}</div>
+        <div><h3>Precision par niveau de confiance</h3>${confidenceBands}</div>
+      </section>
+      <p class="study-technical-note">Base complete : ${Number(summary?.total) || rows.length} heures · ${Number(summary?.live_total) || live.length} reelles · ${Number(summary?.replay_total) || replay.length} rejouees.</p>
+    </details>
   `;
 }
 
@@ -1580,11 +1685,12 @@ function renderSupervision(result) {
   const accuracyText = backtest.accuracy === null ? "--" : `${Math.round(backtest.accuracy * 100)}%`;
   const confidenceMove = result.confidence - result.rawConfidence;
   const recentRows = backtest.rows.slice(-6).reverse().map((row) => {
-    const verdict = row.correct === null ? "neutre" : row.correct ? "juste" : "faux";
+    const direction = displayDirection(row.orientation || row.predicted);
+    const verdict = row.correct === null ? "sans mise" : row.correct ? "juste" : "faux";
     return `
-      <article class="supervision-row ${directionClass(row.predicted)}">
+      <article class="supervision-row ${directionClass(direction)}">
         <span>${fmtTime.format(new Date(row.bucket))}</span>
-        <strong>${row.predicted} -> ${row.actual}</strong>
+        <strong>${direction} → ${row.actual}</strong>
         <small>${verdict} | confiance ${Math.round(row.confidence * 100)}%</small>
       </article>
     `;
@@ -1626,7 +1732,10 @@ function renderHourlyHistory(hours) {
     const start = new Date(hour.bucket);
     const end = new Date(hour.bucket + 3600000);
     const fixed = hypotheses[String(hour.bucket)];
-    const verdict = fixed ? (fixed.direction === "~" ? "neutre" : fixed.direction === hour.direction ? "juste" : "faux") : "non capturee";
+    const fixedDirection = fixed
+      ? displayDirection(fixed.direction, { value: fixed.forecastPrice, reference: fixed.startPrice })
+      : null;
+    const verdict = fixed ? (fixed.direction === "~" ? "sans mise" : fixedDirection === hour.direction ? "juste" : "faux") : "non capturee";
     const node = document.createElement("article");
     node.className = `history-card ${directionClass(hour.direction)}`;
     node.innerHTML = `
@@ -1634,7 +1743,7 @@ function renderHourlyHistory(hours) {
       <strong>${hour.direction} ${fmtPct.format(hour.deltaPct)}</strong>
       <small>O ${fmtUsd.format(hour.open)} | C ${fmtUsd.format(hour.close)}</small>
       <small>Range ${fmtPct.format(hour.rangePct)} | ${hour.complete} min</small>
-      <small>Hypothese fixe : ${fixed ? fixed.direction : "--"} ${verdict}</small>
+      <small>Hypothese fixe : ${fixedDirection || "--"} ${verdict}</small>
     `;
     els.hourHistory.appendChild(node);
   });
@@ -1959,7 +2068,7 @@ function formatDuration(ms) {
 async function shareApp() {
   const shareData = {
     title: "BTC1H",
-    text: "Lecture directionnelle BTC 1h en temps reel avec signal + / - / ~, creneaux, indicateurs et historique horaire.",
+    text: "Lecture directionnelle BTC 1h en temps reel avec orientation + ou -, confiance, rentabilite et historique horaire.",
     url: window.location.href
   };
   try {
