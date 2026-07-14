@@ -1,7 +1,13 @@
 const state = {
+  session: null,
+  profile: null,
+  appStarted: false,
+  secureAnalysis: null,
   candles: [],
   liveTimer: null,
   market: null,
+  marketPricing: null,
+  lastAlertKey: null,
   quotaTimer: null,
   quotaLocked: false,
   studyObservations: [],
@@ -14,10 +20,36 @@ const remoteConfig = window.BTC1H_CONFIG || {};
 const QUOTA_BASE_MS = 2 * 60 * 60 * 1000;
 const QUOTA_REWARD_MS = 2 * 60 * 60 * 1000;
 const QUOTA_STORAGE_KEY = "btc-signal-engine-quota";
+const AUTH_SESSION_STORAGE_KEY = "btc1h-private-session";
 const HOURLY_HYPOTHESIS_STORAGE_KEY = "btc-signal-engine-hourly-hypotheses";
 const NEUTRAL_STRENGTH_THRESHOLD = 0.32;
+const FIXED_MODEL_VERSION = "fixed-hour-v3.0.0";
+const MIN_EXPECTED_VALUE = 0.02;
 
 const els = {
+  authGate: document.getElementById("authGate"),
+  appShell: document.getElementById("appShell"),
+  authTabs: document.getElementById("authTabs"),
+  showLoginBtn: document.getElementById("showLoginBtn"),
+  showSignupBtn: document.getElementById("showSignupBtn"),
+  loginForm: document.getElementById("loginForm"),
+  signupForm: document.getElementById("signupForm"),
+  loginEmail: document.getElementById("loginEmail"),
+  loginPassword: document.getElementById("loginPassword"),
+  signupEmail: document.getElementById("signupEmail"),
+  signupPassword: document.getElementById("signupPassword"),
+  signupPasswordConfirm: document.getElementById("signupPasswordConfirm"),
+  pendingAccess: document.getElementById("pendingAccess"),
+  blockedAccess: document.getElementById("blockedAccess"),
+  pendingLogoutBtn: document.getElementById("pendingLogoutBtn"),
+  blockedLogoutBtn: document.getElementById("blockedLogoutBtn"),
+  authStatus: document.getElementById("authStatus"),
+  accountIdentity: document.getElementById("accountIdentity"),
+  logoutBtn: document.getElementById("logoutBtn"),
+  accessManagementDetails: document.getElementById("accessManagementDetails"),
+  adminAccessPanel: document.getElementById("adminAccessPanel"),
+  refreshAccessUsersBtn: document.getElementById("refreshAccessUsersBtn"),
+  accessUsersList: document.getElementById("accessUsersList"),
   shareBtn: document.getElementById("shareBtn"),
   refreshBtn: document.getElementById("refreshBtn"),
   rewardAdBtn: document.getElementById("rewardAdBtn"),
@@ -31,6 +63,7 @@ const els = {
   loadMarketBtn: document.getElementById("loadMarketBtn"),
   liveToggle: document.getElementById("liveToggle"),
   indicatorChartsToggle: document.getElementById("indicatorChartsToggle"),
+  decisionAlertsToggle: document.getElementById("decisionAlertsToggle"),
   statusLine: document.getElementById("statusLine"),
   shareStatus: document.getElementById("shareStatus"),
   signalCard: document.getElementById("signalCard"),
@@ -113,23 +146,349 @@ function getSettings() {
   };
 }
 
-async function fetchBinanceCandles() {
+function authConfig() {
+  return {
+    url: String(remoteConfig.supabaseUrl || "").replace(/\/$/, ""),
+    key: String(remoteConfig.supabaseAnonKey || "")
+  };
+}
+
+function setAuthStatus(message, mode = "") {
+  els.authStatus.textContent = message;
+  els.authStatus.className = `auth-status${mode ? ` is-${mode}` : ""}`;
+}
+
+function setAuthMode(mode) {
+  const login = mode === "login";
+  els.loginForm.hidden = !login;
+  els.signupForm.hidden = login;
+  els.authTabs.hidden = false;
+  els.pendingAccess.hidden = true;
+  els.blockedAccess.hidden = true;
+  els.showLoginBtn.classList.toggle("is-active", login);
+  els.showSignupBtn.classList.toggle("is-active", !login);
+  setAuthStatus("");
+}
+
+function readAuthSession() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(AUTH_SESSION_STORAGE_KEY));
+    return parsed?.access_token && parsed?.refresh_token ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveAuthSession(payload) {
+  const session = payload?.session || payload;
+  if (!session?.access_token || !session?.refresh_token) return null;
+  const expiresAt = Number(session.expires_at)
+    || Math.floor(Date.now() / 1000) + (Number(session.expires_in) || 3600);
+  state.session = { ...session, expires_at: expiresAt };
+  localStorage.setItem(AUTH_SESSION_STORAGE_KEY, JSON.stringify(state.session));
+  return state.session;
+}
+
+function clearAuthSession() {
+  state.session = null;
+  state.profile = null;
+  state.secureAnalysis = null;
+  localStorage.removeItem(AUTH_SESSION_STORAGE_KEY);
+}
+
+async function authRequest(path, body, accessToken = null) {
+  const { url, key } = authConfig();
+  if (!url || !key) throw new Error("Configuration Supabase absente.");
+  const headers = { apikey: key, "Content-Type": "application/json" };
+  if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
+  const response = await fetch(`${url}/auth/v1/${path}`, {
+    method: "POST",
+    headers,
+    body: body === null ? undefined : JSON.stringify(body)
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.msg || data.error_description || data.message || data.error || `Authentification ${response.status}`);
+  return data;
+}
+
+async function refreshAuthSession(session) {
+  if (!session?.refresh_token) return null;
+  const data = await authRequest("token?grant_type=refresh_token", { refresh_token: session.refresh_token });
+  return saveAuthSession(data);
+}
+
+async function getValidSession() {
+  let session = state.session || readAuthSession();
+  if (!session) return null;
+  if ((Number(session.expires_at) || 0) <= Math.floor(Date.now() / 1000) + 90) {
+    try {
+      session = await refreshAuthSession(session);
+    } catch {
+      clearAuthSession();
+      return null;
+    }
+  } else {
+    state.session = session;
+  }
+  return session;
+}
+
+async function fetchOwnProfile(session) {
+  const { url, key } = authConfig();
+  const userId = session?.user?.id;
+  if (!userId) {
+    const response = await fetch(`${url}/auth/v1/user`, {
+      headers: { apikey: key, Authorization: `Bearer ${session.access_token}` }
+    });
+    const user = await response.json().catch(() => null);
+    if (!response.ok || !user?.id) throw new Error("Session invalide.");
+    session.user = user;
+    saveAuthSession(session);
+  }
+  const response = await fetch(
+    `${url}/rest/v1/app_users?select=user_id,email,status,role&user_id=eq.${encodeURIComponent(session.user.id)}&limit=1`,
+    { headers: { apikey: key, Authorization: `Bearer ${session.access_token}` } }
+  );
+  if (!response.ok) throw new Error(`Verification d'acces impossible (${response.status}).`);
+  return (await response.json())[0] || { user_id: session.user.id, email: session.user.email, status: "pending", role: "user" };
+}
+
+async function authorizeSession(session) {
+  setAuthStatus("Verification de l'autorisation...");
+  const profile = await fetchOwnProfile(session);
+  state.profile = profile;
+  if (profile.status === "approved") {
+    els.authGate.hidden = true;
+    els.appShell.hidden = false;
+    els.accountIdentity.textContent = profile.email || session.user?.email || "Compte autorise";
+    startAuthorizedApp();
+    return;
+  }
+  els.appShell.hidden = true;
+  els.authGate.hidden = false;
+  els.authTabs.hidden = true;
+  els.loginForm.hidden = true;
+  els.signupForm.hidden = true;
+  els.pendingAccess.hidden = profile.status !== "pending";
+  els.blockedAccess.hidden = profile.status !== "blocked";
+  setAuthStatus(profile.status === "blocked" ? "Ce compte a ete bloque." : "Demande en attente.", profile.status === "blocked" ? "error" : "");
+}
+
+async function bootstrapAuth() {
+  const { url, key } = authConfig();
+  if (!url || !key) {
+    setAuthStatus("Renseigne d'abord Supabase dans config.js.", "error");
+    return;
+  }
+  const session = await getValidSession();
+  if (!session) {
+    setAuthMode("login");
+    return;
+  }
+  try {
+    await authorizeSession(session);
+  } catch (error) {
+    clearAuthSession();
+    setAuthMode("login");
+    setAuthStatus(error.message, "error");
+  }
+}
+
+async function signOut() {
+  const session = state.session;
+  if (session?.access_token) {
+    await authRequest("logout", {}, session.access_token).catch(() => null);
+  }
+  if (state.liveTimer) clearInterval(state.liveTimer);
+  if (state.quotaTimer) clearInterval(state.quotaTimer);
+  state.liveTimer = null;
+  state.quotaTimer = null;
+  clearAuthSession();
+  els.appShell.hidden = true;
+  els.authGate.hidden = false;
+  setAuthMode("login");
+  setAuthStatus("Deconnecte.");
+}
+
+function bindAuthEvents() {
+  els.showLoginBtn.addEventListener("click", () => setAuthMode("login"));
+  els.showSignupBtn.addEventListener("click", () => setAuthMode("signup"));
+  els.pendingLogoutBtn.addEventListener("click", signOut);
+  els.blockedLogoutBtn.addEventListener("click", signOut);
+  els.loginForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    setAuthStatus("Connexion...");
+    try {
+      const data = await authRequest("token?grant_type=password", {
+        email: els.loginEmail.value.trim(),
+        password: els.loginPassword.value
+      });
+      const session = saveAuthSession(data);
+      if (!session) throw new Error("Session non recue.");
+      await authorizeSession(session);
+    } catch (error) {
+      setAuthStatus(error.message, "error");
+    }
+  });
+  els.signupForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (els.signupPassword.value !== els.signupPasswordConfirm.value) {
+      setAuthStatus("Les deux mots de passe sont differents.", "error");
+      return;
+    }
+    setAuthStatus("Creation du compte...");
+    try {
+      const data = await authRequest("signup", {
+        email: els.signupEmail.value.trim(),
+        password: els.signupPassword.value
+      });
+      const session = saveAuthSession(data);
+      if (session) {
+        await authorizeSession(session);
+      } else {
+        setAuthMode("login");
+        els.loginEmail.value = els.signupEmail.value.trim();
+        setAuthStatus("Compte cree. Confirme l'e-mail recu, puis connecte-toi pour attendre l'autorisation.", "success");
+      }
+    } catch (error) {
+      setAuthStatus(error.message, "error");
+    }
+  });
+}
+
+function startAuthorizedApp() {
+  configureAdminAccess();
+  if (state.appStarted) {
+    restartLiveTimer();
+    fetchSecureAnalysis().catch(showError);
+    return;
+  }
+  state.appStarted = true;
+  bindEvents();
+  startQuotaTimer();
+  restartLiveTimer();
+  refreshStudyDatabase(true).catch(() => null);
+  fetchSecureAnalysis().catch(showError);
+}
+
+function configureAdminAccess() {
+  const isAdmin = state.profile?.role === "admin" && state.profile?.status === "approved";
+  els.accessManagementDetails.hidden = !isAdmin;
+  els.adminAccessPanel.hidden = !isAdmin;
+  if (isAdmin) loadAccessUsers().catch((error) => {
+    els.accessUsersList.textContent = error.message;
+  });
+}
+
+async function authorizedRest(path, init = {}) {
+  const session = await getValidSession();
+  const { url, key } = authConfig();
+  if (!session) throw new Error("Session expiree.");
+  const response = await fetch(`${url}/rest/v1/${path}`, {
+    ...init,
+    headers: {
+      apikey: key,
+      Authorization: `Bearer ${session.access_token}`,
+      "Content-Type": "application/json",
+      ...(init.headers || {})
+    }
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.message || data.error || `Base ${response.status}`);
+  }
+  const text = await response.text();
+  return text ? JSON.parse(text) : null;
+}
+
+async function loadAccessUsers() {
+  if (state.profile?.role !== "admin") return;
+  els.accessUsersList.textContent = "Chargement des comptes...";
+  const rows = await authorizedRest("app_users?select=user_id,email,status,role,created_at,approved_at&order=created_at.desc");
+  els.accessUsersList.innerHTML = "";
+  asArray(rows).forEach((row) => {
+    const article = document.createElement("article");
+    article.className = "access-user-row";
+    const identity = document.createElement("div");
+    identity.className = "access-user-identity";
+    const email = document.createElement("strong");
+    email.textContent = row.email || "E-mail indisponible";
+    const meta = document.createElement("small");
+    meta.textContent = `${row.role} | inscription ${new Date(row.created_at).toLocaleDateString("fr-FR")}`;
+    identity.append(email, meta);
+    const status = document.createElement("span");
+    status.className = "access-status";
+    status.textContent = row.status;
+    const actions = document.createElement("div");
+    actions.className = "access-user-actions";
+    if (row.user_id !== state.profile.user_id) {
+      const approve = document.createElement("button");
+      approve.type = "button";
+      approve.textContent = "Approuver";
+      approve.disabled = row.status === "approved";
+      approve.addEventListener("click", () => updateAccessStatus(row.user_id, "approved").catch(showError));
+      const block = document.createElement("button");
+      block.type = "button";
+      block.textContent = "Bloquer";
+      block.disabled = row.status === "blocked";
+      block.addEventListener("click", () => updateAccessStatus(row.user_id, "blocked").catch(showError));
+      actions.append(approve, block);
+    }
+    article.append(identity, status, actions);
+    els.accessUsersList.appendChild(article);
+  });
+}
+
+async function updateAccessStatus(userId, status) {
+  if (state.profile?.role !== "admin") throw new Error("Droits administrateur requis.");
+  const now = new Date().toISOString();
+  await authorizedRest(`app_users?user_id=eq.${encodeURIComponent(userId)}`, {
+    method: "PATCH",
+    headers: { Prefer: "return=minimal" },
+    body: JSON.stringify({
+      status,
+      approved_at: status === "approved" ? now : null,
+      approved_by: status === "approved" ? state.profile.user_id : null,
+      updated_at: now
+    })
+  });
+  await loadAccessUsers();
+}
+
+async function fetchSecureAnalysis() {
   if (state.quotaLocked) return;
-  setStatus("Chargement des donnees BTC...");
-  const url = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=1000";
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`Binance a repondu ${response.status}`);
-  const rows = await response.json();
-  state.candles = rows.map((row) => ({
-    time: row[0],
-    open: Number(row[1]),
-    high: Number(row[2]),
-    low: Number(row[3]),
-    close: Number(row[4]),
-    volume: Number(row[5])
+  const session = await getValidSession();
+  if (!session || state.profile?.status !== "approved") throw new Error("Compte autorise requis.");
+  setStatus("Analyse securisee en cours...");
+  const { url, key } = authConfig();
+  const response = await fetch(`${url}/functions/v1/secure-analysis`, {
+    headers: { apikey: key, Authorization: `Bearer ${session.access_token}` }
+  });
+  const data = await response.json().catch(() => ({}));
+  if (response.status === 401 || response.status === 403) {
+    await authorizeSession(session).catch(() => null);
+    throw new Error(data.error || "Acces refuse.");
+  }
+  if (!response.ok || !data.ok) throw new Error(data.error || `Analyse securisee ${response.status}`);
+  state.secureAnalysis = data;
+  state.candles = asArray(data.candles).map((row) => ({
+    time: Number(row.time),
+    open: Number(row.open),
+    high: Number(row.high),
+    low: Number(row.low),
+    close: Number(row.close),
+    volume: Number(row.volume)
   }));
   setStatus(`BTC actualise: ${new Date().toLocaleTimeString("fr-FR")}`);
-  analyze();
+  if (state.market) {
+    await refreshMarketPricing().catch((error) => {
+      state.marketPricing = null;
+      log(`Prix Polymarket indisponibles: ${error.message}`);
+      analyze();
+    });
+  } else {
+    analyze();
+  }
   refreshStudyDatabase().catch(() => null);
 }
 
@@ -140,6 +499,7 @@ async function loadMarketFromUrl() {
   setStatus("Lecture du creneau Polymarket...");
   const market = await fetchMarketOrEvent(slug);
   state.market = market;
+  state.marketPricing = null;
   const minutes = inferMinutesLeft(market);
   if (minutes) {
     const nearest = [15, 30, 45, 60].reduce((best, value) => (
@@ -147,9 +507,10 @@ async function loadMarketFromUrl() {
     ), 60);
     els.horizonInput.value = String(nearest);
   }
-  els.marketQuestion.textContent = market.question || market.title || market.slug || "Creneau charge.";
-  log(`Creneau lu: ${els.marketQuestion.textContent}`);
-  analyze();
+  const question = market.question || market.title || market.slug || "Creneau charge.";
+  els.marketQuestion.textContent = question;
+  log(`Creneau lu: ${question}`);
+  await refreshMarketPricing();
 }
 
 async function fetchMarketOrEvent(slug) {
@@ -197,6 +558,64 @@ function inferMinutesLeft(market) {
   return clamp(Math.ceil((endMs - Date.now()) / 60000), 1, 60);
 }
 
+function parseArrayField(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== "string") return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function outcomeDirection(label) {
+  const normalized = String(label || "").trim().toLowerCase();
+  if (/^(up|higher|hausse|haut)$/.test(normalized)) return "+";
+  if (/^(down|lower|baisse|bas)$/.test(normalized)) return "-";
+  return null;
+}
+
+async function refreshMarketPricing() {
+  if (!state.market) return;
+  const outcomes = parseArrayField(state.market.outcomes);
+  const tokenIds = parseArrayField(state.market.clobTokenIds || state.market.clob_token_ids);
+  const pairs = outcomes.map((outcome, index) => ({
+    outcome,
+    tokenId: tokenIds[index],
+    direction: outcomeDirection(outcome)
+  })).filter((pair) => pair.tokenId && pair.direction);
+  if (!pairs.some((pair) => pair.direction === "+") || !pairs.some((pair) => pair.direction === "-")) {
+    throw new Error("Ce marche ne contient pas les issues Up et Down attendues.");
+  }
+  const books = await Promise.all(pairs.map(async (pair) => {
+    const response = await fetch(`https://clob.polymarket.com/book?token_id=${encodeURIComponent(pair.tokenId)}`);
+    if (!response.ok) throw new Error(`Carnet Polymarket ${response.status}`);
+    return { ...pair, book: await response.json() };
+  }));
+  const pricing = {};
+  books.forEach(({ direction, outcome, tokenId, book }) => {
+    const asks = asArray(book.asks).map((row) => Number(row.price)).filter(Number.isFinite);
+    const bids = asArray(book.bids).map((row) => Number(row.price)).filter(Number.isFinite);
+    pricing[direction] = {
+      outcome,
+      tokenId,
+      ask: asks.length ? Math.min(...asks) : null,
+      bid: bids.length ? Math.max(...bids) : null
+    };
+  });
+  state.marketPricing = pricing;
+  const up = pricing["+"];
+  const down = pricing["-"];
+  const question = state.market.question || state.market.title || state.market.slug || "Marche charge";
+  els.marketQuestion.textContent = `${question} | achat Up ${formatCents(up?.ask)} | achat Down ${formatCents(down?.ask)}`;
+  analyze();
+}
+
+function formatCents(value) {
+  return Number.isFinite(value) ? `${Math.round(value * 100)} c` : "--";
+}
+
 function analyze() {
   if (state.quotaLocked) return;
   if (state.candles.length < 240) return;
@@ -212,13 +631,16 @@ function analyze() {
   const strength = Math.abs(projectedReturn) / Math.max(model.noise * settings.sensitivity, 0.000001);
   const rawConfidence = clamp((strength / 2) * model.regime.confidenceMultiplier, 0.05, 0.99);
   const direction = strength < NEUTRAL_STRENGTH_THRESHOLD ? "~" : delta >= 0 ? "+" : "-";
-  const backtest = buildHourlyBacktest(state.candles, settings, 12);
+  const backtest = buildHourlyBacktest();
   const confidence = calibrateConfidence(rawConfidence, backtest, direction);
   const hourlyClose = buildHourlyCloseModel(state.candles, model, spot, settings, backtest);
+  const secureReference = buildSecureOpeningReference(state.candles, spot);
   const remoteReference = buildRemoteOpeningReference(state.candles, spot);
-  const hourlyReference = remoteReference || buildOpeningHourReference(state.candles, settings, backtest) || hourlyClose;
+  const hourlyReference = secureReference || remoteReference;
+  if (!hourlyReference) throw new Error("Repere horaire securise indisponible.");
   const slotForecasts = buildSlotForecasts(spot, model, settings);
-  const hourlyHypothesis = remoteReference
+  const profitDecision = buildProfitDecision(hourlyReference);
+  const hourlyHypothesis = remoteReference && !secureReference
     ? {
         bucket: remoteReference.bucket,
         capturedAt: remoteReference.capturedAt,
@@ -231,8 +653,8 @@ function analyze() {
       }
     : updateHourlyHypothesis({ spot, confidence, direction, slotForecasts, hourlyClose: hourlyReference });
 
-  renderMetrics({ spot, forecast, delta, deltaPct, confidence, direction, settings, model, hourlyHypothesis });
-  renderPlainSummary({ spot, forecast, delta, deltaPct, confidence, direction, settings, model, slotForecasts, hourlyClose: hourlyReference });
+  renderMetrics({ spot, forecast, delta, deltaPct, confidence, direction, settings, model, hourlyHypothesis, hourlyReference, profitDecision });
+  renderPlainSummary({ spot, forecast, delta, deltaPct, confidence, direction, settings, model, slotForecasts, hourlyClose: hourlyReference, profitDecision });
   renderHypotheses({ spot, forecast, delta, confidence, direction, slotForecasts, hourlyHypothesis, hourlyClose, hourlyReference });
   renderHourlyCloseModel(hourlyReference);
   renderSignals({ direction, confidence, settings, model });
@@ -241,6 +663,83 @@ function analyze() {
   renderHourlyHistory(buildHourlyHistory(state.candles, 10));
   renderSupervision({ backtest, rawConfidence, confidence, direction });
   renderChart({ forecast, spot });
+  maybeNotifyDecision(profitDecision, hourlyReference);
+}
+
+function marketFeeRate() {
+  if (!state.market) return 0;
+  const enabled = state.market.feesEnabled ?? state.market.fees_enabled;
+  if (enabled === false || enabled === "false") return 0;
+  const scheduleValue = state.market.feeSchedule || state.market.fee_schedule;
+  let schedule = scheduleValue;
+  if (typeof scheduleValue === "string") {
+    try {
+      schedule = JSON.parse(scheduleValue);
+    } catch {
+      schedule = null;
+    }
+  }
+  const configured = Number(schedule?.rate ?? schedule?.r);
+  return Number.isFinite(configured) && configured >= 0 ? configured : enabled ? 0.07 : 0;
+}
+
+function buildProfitDecision(hourlyReference) {
+  if (!hourlyReference) {
+    return { action: false, status: "waiting-model", label: "ATTENDRE", direction: "~" };
+  }
+  const probabilityUp = Number(hourlyReference.probabilityUp);
+  if (!Number.isFinite(probabilityUp)) {
+    return { action: false, status: "legacy-model", label: "ATTENDRE", direction: "~" };
+  }
+  const signalDirection = hourlyReference.direction;
+  const signalProbability = signalDirection === "+" ? probabilityUp : signalDirection === "-" ? 1 - probabilityUp : Math.max(probabilityUp, 1 - probabilityUp);
+  if (signalDirection === "~") {
+    return { action: false, status: "neutral", label: "PASSER", direction: "~", signalProbability, probabilityUp };
+  }
+  if (!state.marketPricing) {
+    return { action: false, status: "missing-market", label: "PRIX ?", direction: "~", signalDirection, signalProbability, probabilityUp };
+  }
+  const quote = state.marketPricing[signalDirection];
+  if (!quote || !Number.isFinite(quote.ask)) {
+    return { action: false, status: "missing-price", label: "PASSER", direction: "~", signalDirection, signalProbability, probabilityUp };
+  }
+  const feeRate = marketFeeRate();
+  const fee = feeRate * quote.ask * (1 - quote.ask);
+  const totalCost = quote.ask + fee;
+  const expectedValue = signalProbability - totalCost;
+  const action = expectedValue >= MIN_EXPECTED_VALUE;
+  return {
+    action,
+    status: action ? "action" : "no-value",
+    label: action ? (signalDirection === "+" ? "UP" : "DOWN") : "PASSER",
+    direction: action ? signalDirection : "~",
+    signalDirection,
+    signalProbability,
+    probabilityUp,
+    outcome: quote.outcome,
+    ask: quote.ask,
+    bid: quote.bid,
+    fee,
+    totalCost,
+    expectedValue,
+    expectedRoi: expectedValue / Math.max(totalCost, 0.000001)
+  };
+}
+
+function maybeNotifyDecision(decision, hourlyReference) {
+  if (!decision?.action || !els.decisionAlertsToggle?.checked || typeof Notification === "undefined") return;
+  if (Notification.permission !== "granted") return;
+  const key = `${hourlyReference.bucket}-${decision.label}`;
+  if (state.lastAlertKey === key) return;
+  state.lastAlertKey = key;
+  new Notification(`BTC1H : occasion ${decision.label}`, {
+    body: `Modele ${Math.round(decision.signalProbability * 100)}% | achat ${formatCents(decision.ask)} | avantage net ${formatSignedCents(decision.expectedValue)}.`
+  });
+}
+
+function formatSignedCents(value) {
+  if (!Number.isFinite(value)) return "--";
+  return `${value >= 0 ? "+" : ""}${(value * 100).toFixed(1)} c`;
 }
 
 function buildModel(candles, closes, returns, settings, includeSeries = true) {
@@ -332,50 +831,23 @@ function buildModel(candles, closes, returns, settings, includeSeries = true) {
   };
 }
 
-function buildHourlyBacktest(candles, settings, limit) {
-  const completedHours = buildHourlyHistory(candles, limit).reverse();
-  const rows = [];
-  completedHours.forEach((hour) => {
-    const openIndex = candles.findIndex((candle) => candle.time >= hour.bucket);
-    if (openIndex < 240) return;
-    const openingCandle = candles[openIndex];
-    const referenceCandles = candles.slice(0, openIndex + 1);
-    referenceCandles[referenceCandles.length - 1] = {
-      ...openingCandle,
-      high: hour.open,
-      low: hour.open,
-      close: hour.open
-    };
-    const closes = referenceCandles.map((candle) => candle.close);
-    const returns = closes.slice(1).map((close, index) => Math.log(close / closes[index]));
-    const hourlySettings = { ...settings, horizon: 60 };
-    const model = buildModel(referenceCandles, closes, returns, hourlySettings, false);
-    const replay = buildHourlyCloseModel(referenceCandles, model, hour.open, hourlySettings, null);
-    const forecast = replay.closePrice;
-    const predicted = replay.direction;
-    const actual = hour.close >= hour.open ? "+" : "-";
-    const confidence = replay.confidence;
-    rows.push({
-      bucket: hour.bucket,
-      predicted,
-      actual,
-      confidence,
-      deltaPct: hour.deltaPct,
-      errorPct: Math.abs(forecast / Math.max(hour.close, 0.000001) - 1),
-      correct: predicted === "~" ? null : predicted === actual
-    });
-  });
-
-  const attempted = rows.filter((row) => row.correct !== null);
-  const wins = attempted.filter((row) => row.correct).length;
-  const neutral = rows.filter((row) => row.predicted === "~").length;
+function buildHourlyBacktest() {
+  const backtest = state.secureAnalysis?.backtest;
+  if (!backtest) {
+    return { rows: [], attempted: 0, wins: 0, neutral: 0, accuracy: null, averageError: null };
+  }
   return {
-    rows,
-    attempted: attempted.length,
-    wins,
-    neutral,
-    accuracy: attempted.length ? wins / attempted.length : null,
-    averageError: rows.length ? mean(rows.map((row) => row.errorPct)) : null
+    rows: asArray(backtest.rows).map((row) => ({
+      ...row,
+      bucket: Number(row.bucket),
+      confidence: Number(row.confidence),
+      errorPct: Number(row.errorPct)
+    })),
+    attempted: Number(backtest.attempted) || 0,
+    wins: Number(backtest.wins) || 0,
+    neutral: Number(backtest.neutral) || 0,
+    accuracy: backtest.accuracy === null ? null : Number(backtest.accuracy),
+    averageError: backtest.averageError === null ? null : Number(backtest.averageError)
   };
 }
 
@@ -414,7 +886,6 @@ function buildHourlyCloseModel(candles, model, spot, settings, backtest) {
   const lateLock = distanceScore * timePressure;
   const livePressure = clamp(model.composite, -1, 1);
   const volatilityPenalty = model.regime.label === "volatil" ? 0.82 : model.regime.label === "calme" ? 0.92 : 1;
-  const reliability = backtest && backtest.accuracy !== null ? clamp(0.72 + (backtest.accuracy - 0.5) * 0.55, 0.58, 1.08) : 0.82;
 
   const score =
     livePressure * 0.25 +
@@ -423,15 +894,17 @@ function buildHourlyCloseModel(candles, model, spot, settings, backtest) {
     recentBias * 0.13 +
     recentContinuation * 0.08 +
     lateLock * 0.12;
+  const directionalScore = score;
   const remainingScale = Math.sqrt(Math.max(remaining, 1) / 60);
-  const closeReturnFromNow = clamp(score * hourNoise * remainingScale * 0.85, -hourNoise * 1.35, hourNoise * 1.35);
+  const closeReturnFromNow = clamp(directionalScore * hourNoise * remainingScale * 0.85, -hourNoise * 1.35, hourNoise * 1.35);
   const closePrice = spot * Math.exp(closeReturnFromNow);
   const edgeFromOpen = closePrice / open - 1;
   const strength = Math.abs(edgeFromOpen) / Math.max(hourNoise * settings.sensitivity, 0.000001);
   const direction = strength < NEUTRAL_STRENGTH_THRESHOLD ? "~" : closePrice >= open ? "+" : "-";
-  const confidence = direction === "~"
-    ? Math.min(0.32, strength * 0.45)
-    : clamp((strength / 2) * volatilityPenalty * reliability, 0.05, 0.92);
+  const probabilityMargin = clamp(strength * 0.45 * volatilityPenalty, 0, 0.22);
+  const rawProbabilityUp = clamp(0.5 + Math.sign(directionalScore) * probabilityMargin, 0.28, 0.72);
+  const probabilityUp = rawProbabilityUp;
+  const confidence = Math.max(probabilityUp, 1 - probabilityUp);
 
   return {
     bucket,
@@ -448,6 +921,9 @@ function buildHourlyCloseModel(candles, model, spot, settings, backtest) {
     distanceFromOpen,
     rangePosition,
     score,
+    directionalScore,
+    probabilityUp,
+    isOpeningReference: false,
     factors: [
       { label: "Ouverture heure", value: fmtUsd.format(open) },
       { label: "Ecart actuel", value: fmtPct.format(distanceFromOpen) },
@@ -459,28 +935,39 @@ function buildHourlyCloseModel(candles, model, spot, settings, backtest) {
   };
 }
 
-function buildOpeningHourReference(candles, settings, backtest) {
+function buildSecureOpeningReference(candles, spot) {
+  const reference = state.secureAnalysis?.opening;
+  if (!reference) return null;
   const bucket = hourStart(candles.at(-1).time);
-  const openIndex = candles.findIndex((candle) => candle.time >= bucket);
-  if (openIndex < 240) return null;
-  const openingCandle = candles[openIndex];
-  const open = openingCandle.open;
-  const referenceCandles = candles.slice(0, openIndex + 1);
-  referenceCandles[referenceCandles.length - 1] = {
-    ...openingCandle,
-    high: open,
-    low: open,
-    close: open
-  };
-  const closes = referenceCandles.map((candle) => candle.close);
-  const returns = closes.slice(1).map((close, index) => Math.log(close / closes[index]));
-  const hourlySettings = { ...settings, horizon: 60 };
-  const openingModel = buildModel(referenceCandles, closes, returns, hourlySettings, false);
-  const reference = buildHourlyCloseModel(referenceCandles, openingModel, open, hourlySettings, backtest);
+  if (Number(reference.bucket) !== bucket) return null;
+  const currentHour = candles.filter((candle) => candle.time >= bucket);
+  const high = Math.max(...currentHour.map((candle) => candle.high), spot);
+  const low = Math.min(...currentHour.map((candle) => candle.low), spot);
+  const open = Number(reference.open);
+  const closePrice = Number(reference.closePrice);
   return {
-    ...reference,
-    capturedAt: bucket,
-    isOpeningReference: true
+    bucket,
+    capturedAt: Number(reference.capturedAt) || bucket,
+    isOpeningReference: true,
+    isSecureReference: true,
+    modelVersion: state.secureAnalysis.modelVersion,
+    open,
+    spot,
+    high,
+    low,
+    elapsed: currentHour.length,
+    remaining: Math.max(0, 60 - currentHour.length),
+    closePrice,
+    direction: reference.direction,
+    confidence: Number(reference.confidence),
+    probabilityUp: Number(reference.probabilityUp),
+    edgeFromOpen: closePrice / open - 1,
+    factors: [
+      { label: "Source fixe", value: "Moteur prive" },
+      { label: "Version modele", value: state.secureAnalysis.modelVersion },
+      { label: "Regime ouverture", value: reference.regime },
+      { label: "Acces", value: "Compte autorise" }
+    ]
   };
 }
 
@@ -489,6 +976,7 @@ function buildRemoteOpeningReference(candles, spot) {
   const bucket = hourStart(candles.at(-1).time);
   const row = state.studyObservations.find((observation) => Date.parse(observation.hour_open) === bucket);
   if (!row) return null;
+  if (row.model_version !== FIXED_MODEL_VERSION) return null;
   const currentHour = candles.filter((candle) => candle.time >= bucket);
   const high = Math.max(...currentHour.map((candle) => candle.high), spot);
   const low = Math.min(...currentHour.map((candle) => candle.low), spot);
@@ -507,6 +995,7 @@ function buildRemoteOpeningReference(candles, spot) {
     closePrice: Number(row.predicted_close),
     direction: row.predicted_direction,
     confidence: Number(row.calibrated_confidence),
+    probabilityUp: Number(row.features?.calibratedProbabilityUp),
     edgeFromOpen: Number(row.predicted_close) / Number(row.opening_price) - 1,
     factors: [
       { label: "Source fixe", value: "Base persistante" },
@@ -652,7 +1141,8 @@ function updateHourlyHypothesis(result) {
   const hypotheses = readHourlyHypotheses();
   const finHour = result.slotForecasts.find((slot) => slot.label === "Fin heure courante");
   const closeModel = result.hourlyClose;
-  const shouldCapture = !hypotheses[key] || (closeModel?.isOpeningReference && hypotheses[key].model !== "opening-reference");
+  const desiredModel = closeModel?.isOpeningReference ? FIXED_MODEL_VERSION : closeModel ? "hourly-close" : "live-projection";
+  const shouldCapture = !hypotheses[key] || hypotheses[key].model !== desiredModel;
   if (shouldCapture && (closeModel || finHour)) {
     hypotheses[key] = {
       bucket,
@@ -662,7 +1152,7 @@ function updateHourlyHypothesis(result) {
       forecastDelta: closeModel ? closeModel.closePrice - closeModel.open : finHour.delta,
       direction: closeModel ? closeModel.direction : finHour.direction,
       confidence: closeModel ? closeModel.confidence : result.confidence,
-      model: closeModel?.isOpeningReference ? "opening-reference" : closeModel ? "hourly-close" : "live-projection"
+      model: desiredModel
     };
     pruneHourlyHypotheses(hypotheses);
     writeHourlyHypotheses(hypotheses);
@@ -724,14 +1214,25 @@ function rsi(closes) {
 }
 
 function renderMetrics(result) {
-  els.signalCard.className = `hero-signal ${directionClass(result.direction)}`;
-  els.directionValue.textContent = result.direction;
-  els.directionText.textContent = result.direction === "+"
-    ? "Scenario principal : BTC plus haut"
-    : result.direction === "-"
-      ? "Scenario principal : BTC plus bas"
-      : "Scenario principal : zone neutre";
-  els.directionContext.textContent = `${fmtDelta.format(result.delta)} estime sur ${result.settings.horizon} min. Regime ${result.model.regime.label}.`;
+  const decision = result.profitDecision;
+  els.signalCard.className = `hero-signal ${directionClass(decision.direction)}`;
+  els.directionValue.textContent = decision.label;
+  if (decision.status === "action") {
+    els.directionText.textContent = `Occasion nette : acheter ${decision.outcome}`;
+    els.directionContext.textContent = `Modele ${Math.round(decision.signalProbability * 100)}% | cout avec frais ${formatCents(decision.totalCost)} | avantage ${formatSignedCents(decision.expectedValue)}.`;
+  } else if (decision.status === "missing-market") {
+    els.directionText.textContent = `Signal ${decision.signalDirection === "+" ? "Up" : "Down"}, prix du marche requis`;
+    els.directionContext.textContent = "Charge le creneau Polymarket : aucune decision d'argent n'est affichee sans prix achetable.";
+  } else if (decision.status === "no-value") {
+    els.directionText.textContent = "Pas d'avantage apres prix et frais";
+    els.directionContext.textContent = `Modele ${Math.round(decision.signalProbability * 100)}% | cout ${formatCents(decision.totalCost)} | avantage ${formatSignedCents(decision.expectedValue)}.`;
+  } else if (decision.status === "legacy-model") {
+    els.directionText.textContent = "Ancien repere ignore";
+    els.directionContext.textContent = "Le nouveau modele local prend le relais des que les bougies de l'heure sont disponibles.";
+  } else {
+    els.directionText.textContent = "Signal insuffisant : ne pas jouer cette heure";
+    els.directionContext.textContent = `Probabilite la plus haute ${Math.round((decision.signalProbability || 0.5) * 100)}%. Le filtre protege contre les paris sans avantage.`;
+  }
   els.spotValue.textContent = fmtUsd.format(result.spot);
   els.forecastValue.textContent = fmtUsd.format(result.forecast);
   els.forecastContext.textContent = `Confiance variable ${Math.round(result.confidence * 100)}% | horizon ${result.settings.horizon} min`;
@@ -757,13 +1258,20 @@ function renderPlainSummary(result) {
   const hourlyText = result.hourlyClose
     ? `Modele horaire: ${result.hourlyClose.direction} a ${Math.round(result.hourlyClose.confidence * 100)}%, cloture estimee ${fmtUsd.format(result.hourlyClose.closePrice)} contre ouverture ${fmtUsd.format(result.hourlyClose.open)}.`
     : "";
-  const caution = result.model.regime.label === "volatil"
-    ? "Marche volatil: le signal peut changer vite."
-    : Math.abs(result.delta) < result.model.atrValue * 0.4
-      ? "Ecart faible: le bruit peut dominer."
-      : "Lecture exploitable, a surveiller avec les clotures.";
+  const caution = !result.profitDecision.action
+    ? "Aucune mise suggeree tant que le filtre de rentabilite n'est pas valide."
+    : result.model.regime.label === "volatil"
+      ? "Marche volatil: l'avantage peut changer vite."
+      : "Occasion detectee, sans garantie de resultat.";
+  const decision = result.profitDecision;
+  const decisionText = decision.action
+    ? `<strong>Action ${decision.label}</strong> : avantage net estime ${formatSignedCents(decision.expectedValue)} par part au prix actuel.`
+    : decision.status === "missing-market"
+      ? `<strong>Prix manquant</strong> : le signal seul ne suffit pas pour decider d'un pari.`
+      : `<strong>Passer cette heure</strong> : aucun avantage net valide au filtre actuel.`;
   els.plainSummary.innerHTML = `
-    <p><strong>${result.direction === "+" ? "Plutot haussier" : result.direction === "-" ? "Plutot baissier" : "Neutre"}</strong> avec une confiance ${confidenceLabel}.</p>
+    <p>${decisionText}</p>
+    <p>Lecture live ${result.direction === "+" ? "haussiere" : result.direction === "-" ? "baissiere" : "neutre"}, confiance ${confidenceLabel}.</p>
     <p>${nextText}</p>
     <p>${hourlyText}</p>
     <p>${caution}</p>
@@ -773,7 +1281,7 @@ function renderPlainSummary(result) {
 function renderHypotheses(result) {
   els.liveHypothesisCard.className = `hypothesis-card ${directionClass(result.direction)}`;
   els.liveHypothesisValue.textContent = `${result.direction} ${Math.round(result.confidence * 100)}%`;
-  els.liveHypothesisContext.textContent = `Cap live ${fmtUsd.format(result.forecast)} (${fmtDelta.format(result.delta)}). Cote indicative ${formatDecimalOdds(result.confidence, result.direction)}.`;
+  els.liveHypothesisContext.textContent = `Cap live ${fmtUsd.format(result.forecast)} (${fmtDelta.format(result.delta)}). Ce signal n'est pas une cote de pari.`;
 
   const fixed = result.hourlyHypothesis;
   if (!fixed) {
@@ -785,11 +1293,6 @@ function renderHypotheses(result) {
   els.fixedHypothesisCard.className = `hypothesis-card ${directionClass(fixed.direction)}`;
   els.fixedHypothesisValue.textContent = `${fixed.direction} ${Math.round(fixed.confidence * 100)}%`;
   els.fixedHypothesisContext.textContent = `Repere garde pour juger l'heure: ouverture ${fmtTime.format(new Date(fixed.capturedAt))}, cloture estimee ${fmtUsd.format(fixed.forecastPrice)}.`;
-}
-
-function formatDecimalOdds(confidence, direction) {
-  if (direction === "~" || confidence <= 0) return "--";
-  return `x${(1 / clamp(confidence, 0.05, 0.95)).toFixed(2)}`;
 }
 
 function renderHourlyCloseModel(hourlyClose) {
@@ -931,18 +1434,21 @@ async function refreshStudyDatabase(force = false) {
     renderStudyDatabase([]);
     return;
   }
+  const session = await getValidSession();
+  if (!session || state.profile?.status !== "approved") {
+    els.databaseStatus.textContent = "Compte autorise requis";
+    els.databaseStatus.className = "database-status is-error";
+    return;
+  }
   if (!force && state.studyObservations.length && Date.now() - state.lastStudyFetch < 60000) return;
   els.databaseStatus.textContent = "Synchronisation...";
   els.databaseStatus.className = "database-status is-syncing";
   const fields = [
     "hour_open", "prediction_origin", "model_version", "opening_price", "predicted_close",
     "predicted_direction", "calibrated_confidence", "regime", "actual_close",
-    "actual_direction", "verdict", "absolute_error_pct"
+    "actual_direction", "verdict", "absolute_error_pct", "features"
   ].join(",");
-  const requestHeaders = { apikey: key };
-  if (key.startsWith("eyJ")) {
-    requestHeaders.Authorization = `Bearer ${key}`;
-  }
+  const requestHeaders = { apikey: key, Authorization: `Bearer ${session.access_token}` };
   const [response, summaryResponse] = await Promise.all([
     fetch(`${url}/rest/v1/hourly_observations?select=${fields}&order=hour_open.desc&limit=1000`, { headers: requestHeaders }),
     fetch(`${url}/rest/v1/hourly_study_overview?select=*`, { headers: requestHeaders })
@@ -998,38 +1504,38 @@ function renderStudyDatabase(rows, summary = null) {
     return;
   }
 
-  const judged = rows.filter((row) => row.verdict === "correct" || row.verdict === "wrong");
+  const currentModelRows = rows.filter((row) => row.model_version === FIXED_MODEL_VERSION);
+  const judged = currentModelRows.filter((row) => row.verdict === "correct" || row.verdict === "wrong");
   const live = rows.filter((row) => row.prediction_origin === "live");
   const replay = rows.filter((row) => row.prediction_origin === "replay");
-  const neutral = rows.filter((row) => row.verdict === "neutral");
-  const pending = rows.filter((row) => row.verdict === "pending");
+  const currentLive = currentModelRows.filter((row) => row.prediction_origin === "live");
+  const neutral = currentModelRows.filter((row) => row.verdict === "neutral");
+  const pending = currentModelRows.filter((row) => row.verdict === "pending");
   const totalCount = Number(summary?.total) || rows.length;
   const liveCount = Number(summary?.live_total) || live.length;
   const replayCount = Number(summary?.replay_total) || replay.length;
-  const judgedCount = Number(summary?.judged_total) || judged.length;
-  const winsCount = Number(summary?.wins_total) || judged.filter((row) => row.verdict === "correct").length;
-  const liveJudgedCount = Number(summary?.live_judged_total) || live.filter((row) => row.verdict === "correct" || row.verdict === "wrong").length;
-  const liveWinsCount = Number(summary?.live_wins_total) || live.filter((row) => row.verdict === "correct").length;
-  const neutralCount = Number(summary?.neutral_total) || neutral.length;
-  const pendingCount = Number(summary?.pending_total) || pending.length;
+  const judgedCount = judged.length;
+  const winsCount = judged.filter((row) => row.verdict === "correct").length;
+  const liveJudgedCount = currentLive.filter((row) => row.verdict === "correct" || row.verdict === "wrong").length;
+  const liveWinsCount = currentLive.filter((row) => row.verdict === "correct").length;
+  const neutralCount = neutral.length;
+  const pendingCount = pending.length;
   const accuracy = judgedCount ? winsCount / judgedCount : null;
   const liveAccuracy = liveJudgedCount ? liveWinsCount / liveJudgedCount : null;
-  const averageError = summary?.average_error_pct === null || summary?.average_error_pct === undefined
-    ? (judged.length ? mean(judged.map((row) => Number(row.absolute_error_pct) || 0)) : null)
-    : Number(summary.average_error_pct);
+  const averageError = judged.length ? mean(judged.map((row) => Number(row.absolute_error_pct) || 0)) : null;
   const last24Count = Number(summary?.last_24h_total) || rows.filter((row) => Date.parse(row.hour_open) >= Date.now() - 24 * 3600000).length;
 
   const regimes = ["directionnel", "volatil", "calme", "neutre"]
-    .map((regime) => studyBar(`Regime ${regime}`, rows.filter((row) => row.regime === regime)))
+    .map((regime) => studyBar(`Regime ${regime}`, currentModelRows.filter((row) => row.regime === regime)))
     .join("");
   const confidenceBands = [
-    { label: "Confiance < 35%", min: 0, max: 0.35 },
-    { label: "Confiance 35-55%", min: 0.35, max: 0.55 },
-    { label: "Confiance 55-75%", min: 0.55, max: 0.75 },
-    { label: "Confiance > 75%", min: 0.75, max: 1.01 }
+    { label: "Confiance < 55%", min: 0, max: 0.55 },
+    { label: "Confiance 55-60%", min: 0.55, max: 0.60 },
+    { label: "Confiance 60-65%", min: 0.60, max: 0.65 },
+    { label: "Confiance > 65%", min: 0.65, max: 1.01 }
   ].map((band) => studyBar(
     band.label,
-    rows.filter((row) => Number(row.calibrated_confidence) >= band.min && Number(row.calibrated_confidence) < band.max)
+    currentModelRows.filter((row) => Number(row.calibrated_confidence) >= band.min && Number(row.calibrated_confidence) < band.max)
   )).join("");
 
   const timeline = rows.slice(0, 18).map((row) => {
@@ -1047,8 +1553,8 @@ function renderStudyDatabase(rows, summary = null) {
   els.studyDatabase.innerHTML = `
     <section class="study-kpis">
       <article><span>Heures memorisees</span><strong>${totalCount}</strong><small>${liveCount} reelles · ${replayCount} rejouees</small></article>
-      <article><span>Reussite globale</span><strong>${accuracy === null ? "--" : `${Math.round(accuracy * 100)}%`}</strong><small>${judgedCount} decisions tranchees</small></article>
-      <article><span>Reussite live</span><strong>${liveAccuracy === null ? "--" : `${Math.round(liveAccuracy * 100)}%`}</strong><small>predictions faites avant le resultat</small></article>
+      <article><span>Reussite v3</span><strong>${accuracy === null ? "--" : `${Math.round(accuracy * 100)}%`}</strong><small>${judgedCount} decisions tranchees</small></article>
+      <article><span>Reussite live v3</span><strong>${liveAccuracy === null ? "--" : `${Math.round(liveAccuracy * 100)}%`}</strong><small>predictions faites avant le resultat</small></article>
       <article><span>Erreur prix moyenne</span><strong>${averageError === null ? "--" : fmtPct.format(averageError)}</strong><small>projection fixe contre cloture</small></article>
       <article><span>Dernieres 24 h</span><strong>${last24Count}</strong><small>observations disponibles</small></article>
       <article><span>Etats non tranches</span><strong>${neutralCount + pendingCount}</strong><small>${neutralCount} neutres · ${pendingCount} en cours</small></article>
@@ -1318,7 +1824,7 @@ function restartLiveTimer() {
   state.liveTimer = null;
   if (!els.liveToggle.checked || state.quotaLocked) return;
   state.liveTimer = setInterval(() => {
-    fetchBinanceCandles().catch(showError);
+    fetchSecureAnalysis().catch(showError);
   }, 10000);
 }
 
@@ -1334,12 +1840,25 @@ function log(message) {
 }
 
 function bindEvents() {
+  els.logoutBtn.addEventListener("click", signOut);
+  els.refreshAccessUsersBtn.addEventListener("click", () => loadAccessUsers().catch(showError));
   els.shareBtn.addEventListener("click", shareApp);
   els.rewardAdBtn.addEventListener("click", grantRewardTime);
   els.overlayRewardAdBtn.addEventListener("click", grantRewardTime);
-  els.refreshBtn.addEventListener("click", () => fetchBinanceCandles().catch(showError));
+  els.refreshBtn.addEventListener("click", () => fetchSecureAnalysis().catch(showError));
   els.loadMarketBtn.addEventListener("click", () => loadMarketFromUrl().catch(showError));
   els.liveToggle.addEventListener("change", restartLiveTimer);
+  els.decisionAlertsToggle?.addEventListener("change", async () => {
+    if (!els.decisionAlertsToggle.checked || typeof Notification === "undefined") return;
+    const permission = await Notification.requestPermission();
+    if (permission !== "granted") {
+      els.decisionAlertsToggle.checked = false;
+      setStatus("Notifications non autorisees par le navigateur.");
+    } else {
+      setStatus("Alertes activees : BTC1H signalera uniquement une occasion nette.");
+      analyze();
+    }
+  });
   [els.horizonInput, els.sensitivityInput, els.indicatorChartsToggle].forEach((input) => {
     input.addEventListener("input", analyze);
     input.addEventListener("change", analyze);
@@ -1426,7 +1945,7 @@ function grantRewardTime() {
   state.quotaLocked = false;
   renderQuota(quota);
   setStatus("Pub validee : 2h ajoutees.");
-  fetchBinanceCandles().catch(showError);
+  fetchSecureAnalysis().catch(showError);
 }
 
 function formatDuration(ms) {
@@ -1471,8 +1990,5 @@ function showError(error) {
   log(`Erreur: ${error.message}`);
 }
 
-bindEvents();
-startQuotaTimer();
-restartLiveTimer();
-refreshStudyDatabase(true).catch(() => null);
-fetchBinanceCandles().catch(showError);
+bindAuthEvents();
+bootstrapAuth().catch((error) => setAuthStatus(error.message, "error"));

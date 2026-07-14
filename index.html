@@ -16,14 +16,72 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <main class="shell">
+  <section class="auth-gate" id="authGate" aria-live="polite">
+    <div class="auth-card">
+      <p class="eyebrow">BTC1H prive</p>
+      <h1>Acces securise</h1>
+      <p class="auth-intro">Connecte-toi avec un compte autorise. Toute nouvelle inscription doit etre approuvee avant de pouvoir ouvrir l'application.</p>
+
+      <div class="auth-tabs" id="authTabs">
+        <button id="showLoginBtn" class="is-active" type="button">Connexion</button>
+        <button id="showSignupBtn" type="button">Creer un compte</button>
+      </div>
+
+      <form id="loginForm" class="auth-form">
+        <label>
+          Adresse e-mail
+          <input id="loginEmail" type="email" autocomplete="email" required>
+        </label>
+        <label>
+          Mot de passe
+          <input id="loginPassword" type="password" autocomplete="current-password" minlength="8" required>
+        </label>
+        <button class="primary" type="submit">Se connecter</button>
+      </form>
+
+      <form id="signupForm" class="auth-form" hidden>
+        <label>
+          Adresse e-mail
+          <input id="signupEmail" type="email" autocomplete="email" required>
+        </label>
+        <label>
+          Mot de passe
+          <input id="signupPassword" type="password" autocomplete="new-password" minlength="8" required>
+        </label>
+        <label>
+          Confirmer le mot de passe
+          <input id="signupPasswordConfirm" type="password" autocomplete="new-password" minlength="8" required>
+        </label>
+        <button class="primary" type="submit">Demander un acces</button>
+        <small>La creation du compte ne donne pas automatiquement acces au moteur.</small>
+      </form>
+
+      <div id="pendingAccess" class="auth-message auth-pending" hidden>
+        <strong>Compte en attente d'autorisation</strong>
+        <p>Ton inscription est bien enregistree. L'administrateur doit encore approuver ce compte.</p>
+        <button id="pendingLogoutBtn" type="button">Utiliser un autre compte</button>
+      </div>
+
+      <div id="blockedAccess" class="auth-message auth-blocked" hidden>
+        <strong>Acces bloque</strong>
+        <p>Ce compte n'est pas autorise a utiliser BTC1H.</p>
+        <button id="blockedLogoutBtn" type="button">Utiliser un autre compte</button>
+      </div>
+
+      <p id="authStatus" class="auth-status">Verification de la session...</p>
+    </div>
+  </section>
+
+  <main class="shell" id="appShell" hidden>
     <section class="topbar" aria-label="Controle principal">
       <div>
         <p class="eyebrow">BTC1H</p>
         <h1>Lecture BTC 1h</h1>
       </div>
       <div class="top-actions">
+        <span id="accountIdentity" class="account-identity"></span>
         <button id="shareBtn" type="button">Partager</button>
+        <button id="logoutBtn" type="button">Se deconnecter</button>
         <button id="refreshBtn" class="primary" type="button">Actualiser</button>
       </div>
     </section>
@@ -67,10 +125,10 @@
         </select>
       </label>
       <label>
-        URL Polymarket optionnelle
+        URL Polymarket (pour calculer la rentabilite)
         <input id="marketUrlInput" type="search" placeholder="https://polymarket.com/event/...">
       </label>
-      <button id="loadMarketBtn" type="button">Lire creneau</button>
+      <button id="loadMarketBtn" type="button">Lire marche et prix</button>
       <label class="check-row">
         <input id="liveToggle" type="checkbox" checked>
         Live
@@ -78,6 +136,10 @@
       <label class="check-row">
         <input id="indicatorChartsToggle" type="checkbox">
         Graphiques indicateurs
+      </label>
+      <label class="check-row">
+        <input id="decisionAlertsToggle" type="checkbox">
+        Alerte occasion nette
       </label>
     </section>
 
@@ -87,12 +149,12 @@
     <section class="decision-layout">
       <section class="hero-signal" id="signalCard" aria-label="Signal principal">
         <div>
-          <span>Lecture simple</span>
+          <span>Decision apres prix et frais</span>
           <strong id="directionValue">--</strong>
         </div>
         <div class="hero-details">
           <span id="directionText">En attente des donnees BTC.</span>
-          <small id="directionContext">Le moteur compare la pression estimee au prix actuel.</small>
+          <small id="directionContext">Aucun pari n'est propose sans avantage estime apres couts.</small>
         </div>
       </section>
 
@@ -253,6 +315,20 @@
       <div class="study-database" id="studyDatabase">
         <div class="supervision-empty">Connexion a la base d'etude en attente.</div>
       </div>
+    </details>
+
+    <details class="panel compact" id="accessManagementDetails" hidden>
+      <summary>Gestion des acces</summary>
+      <section id="adminAccessPanel" class="admin-access" hidden>
+        <div class="panel-head">
+          <div>
+            <h2>Comptes BTC1H</h2>
+            <p>Approuve ou bloque les inscriptions sans partager les cles Supabase.</p>
+          </div>
+          <button id="refreshAccessUsersBtn" type="button">Actualiser les comptes</button>
+        </div>
+        <div id="accessUsersList" class="access-users-list"></div>
+      </section>
     </details>
 
     <details class="panel compact">
