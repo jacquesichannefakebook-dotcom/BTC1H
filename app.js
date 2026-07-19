@@ -23,8 +23,10 @@ const QUOTA_STORAGE_KEY = "btc-signal-engine-quota";
 const AUTH_SESSION_STORAGE_KEY = "btc1h-private-session";
 const HOURLY_HYPOTHESIS_STORAGE_KEY = "btc-signal-engine-hourly-hypotheses";
 const NEUTRAL_STRENGTH_THRESHOLD = 0.32;
-const FIXED_MODEL_VERSION = "fixed-hour-v3.0.0";
-const MIN_EXPECTED_VALUE = 0.02;
+const FIXED_MODEL_VERSION = "prehour-logit-v1.0.0-20260719";
+const FIXED_TEST_ACCURACY = 0.5416;
+const FIXED_TEST_DECISIONS = 637;
+const LIVE_VALIDATION_TARGET = 500;
 
 const els = {
   authGate: document.getElementById("authGate"),
@@ -680,30 +682,28 @@ function analyze() {
   const rawConfidence = clamp((strength / 2) * model.regime.confidenceMultiplier, 0.05, 0.99);
   const direction = strength < NEUTRAL_STRENGTH_THRESHOLD ? "~" : delta >= 0 ? "+" : "-";
   const backtest = buildHourlyBacktest();
-  const confidence = calibrateConfidence(rawConfidence, backtest, direction);
-  const hourlyClose = buildHourlyCloseModel(state.candles, model, spot, settings, backtest);
+  const confidence = direction === "~" ? Math.min(rawConfidence, 0.32) : rawConfidence;
   const secureReference = buildSecureOpeningReference(state.candles, spot);
   const remoteReference = buildRemoteOpeningReference(state.candles, spot);
   const hourlyReference = secureReference || remoteReference;
-  if (!hourlyReference) throw new Error("Repere horaire securise indisponible.");
   const slotForecasts = buildSlotForecasts(spot, model, settings);
   const profitDecision = buildProfitDecision(hourlyReference);
-  const hourlyHypothesis = remoteReference && !secureReference
+  const hourlyHypothesis = hourlyReference
     ? {
-        bucket: remoteReference.bucket,
-        capturedAt: remoteReference.capturedAt,
-        startPrice: remoteReference.open,
-        forecastPrice: remoteReference.closePrice,
-        forecastDelta: remoteReference.closePrice - remoteReference.open,
-        direction: remoteReference.direction,
-        confidence: remoteReference.confidence,
-        model: `remote-${remoteReference.modelVersion}`
+        bucket: hourlyReference.bucket,
+        capturedAt: hourlyReference.capturedAt,
+        startPrice: hourlyReference.capturePrice,
+        forecastPrice: null,
+        forecastDelta: null,
+        direction: hourlyReference.direction,
+        confidence: hourlyReference.confidence,
+        model: hourlyReference.modelVersion
       }
-    : updateHourlyHypothesis({ spot, confidence, direction, slotForecasts, hourlyClose: hourlyReference });
+    : null;
 
-  renderMetrics({ spot, forecast, delta, deltaPct, confidence, direction, settings, model, hourlyHypothesis, hourlyReference, profitDecision });
-  renderPlainSummary({ spot, forecast, delta, deltaPct, confidence, direction, settings, model, slotForecasts, hourlyClose: hourlyReference, profitDecision });
-  renderHypotheses({ spot, forecast, delta, confidence, direction, slotForecasts, hourlyHypothesis, hourlyClose, hourlyReference });
+  renderMetrics({ spot, forecast, delta, deltaPct, confidence, direction, settings, model, hourlyHypothesis, hourlyReference, profitDecision, backtest });
+  renderPlainSummary({ spot, forecast, delta, deltaPct, confidence, direction, settings, model, slotForecasts, hourlyClose: hourlyReference, profitDecision, backtest });
+  renderHypotheses({ spot, forecast, delta, confidence, direction, slotForecasts, hourlyHypothesis, hourlyReference });
   renderHourlyCloseModel(hourlyReference);
   renderSignals({ direction, confidence, settings, model });
   renderSlots({ spot, model, settings, slotForecasts });
@@ -732,10 +732,10 @@ function marketFeeRate() {
 }
 
 function displayDirection(direction, { probabilityUp, value, reference } = {}) {
-  if (direction === "+" || direction === "-") return direction;
+  if (direction === "+" || direction === "-" || direction === "~") return direction;
   if (Number.isFinite(Number(probabilityUp))) return Number(probabilityUp) >= 0.5 ? "+" : "-";
   if (Number.isFinite(Number(value)) && Number.isFinite(Number(reference))) return Number(value) >= Number(reference) ? "+" : "-";
-  return "+";
+  return "~";
 }
 
 function buildProfitDecision(hourlyReference) {
@@ -744,48 +744,40 @@ function buildProfitDecision(hourlyReference) {
   }
   const probabilityUp = Number(hourlyReference.probabilityUp);
   if (!Number.isFinite(probabilityUp)) {
-    const signalDirection = displayDirection(hourlyReference.direction, {
-      value: hourlyReference.closePrice,
-      reference: hourlyReference.open
-    });
     return {
       action: false,
-      status: "legacy-model",
-      label: signalDirection,
-      direction: signalDirection,
-      signalDirection,
-      signalProbability: Number(hourlyReference.confidence) || 0.5
+      status: "waiting-model",
+      label: "~",
+      direction: "~"
     };
   }
   const modelDirection = hourlyReference.direction;
   const signalDirection = displayDirection(modelDirection, { probabilityUp });
-  const signalProbability = signalDirection === "+" ? probabilityUp : 1 - probabilityUp;
+  const signalProbability = signalDirection === "~" ? 0.5 : signalDirection === "+" ? probabilityUp : 1 - probabilityUp;
   if (modelDirection === "~") {
     return {
       action: false,
       status: "neutral",
-      label: signalDirection,
-      direction: signalDirection,
-      signalDirection,
+      label: "~",
+      direction: "~",
+      signalDirection: "~",
       signalProbability,
       probabilityUp
     };
   }
   if (!state.marketPricing) {
-    return { action: false, status: "missing-market", label: signalDirection, direction: signalDirection, signalDirection, signalProbability, probabilityUp };
+    return { action: false, status: "experimental", label: signalDirection, direction: signalDirection, signalDirection, signalProbability, probabilityUp };
   }
   const quote = state.marketPricing[signalDirection];
   if (!quote || !Number.isFinite(quote.ask)) {
-    return { action: false, status: "missing-price", label: signalDirection, direction: signalDirection, signalDirection, signalProbability, probabilityUp };
+    return { action: false, status: "experimental", label: signalDirection, direction: signalDirection, signalDirection, signalProbability, probabilityUp };
   }
   const feeRate = marketFeeRate();
   const fee = feeRate * quote.ask * (1 - quote.ask);
   const totalCost = quote.ask + fee;
-  const expectedValue = signalProbability - totalCost;
-  const action = expectedValue >= MIN_EXPECTED_VALUE;
   return {
-    action,
-    status: action ? "action" : "no-value",
+    action: false,
+    status: "experimental-market",
     label: signalDirection,
     direction: signalDirection,
     signalDirection,
@@ -796,19 +788,19 @@ function buildProfitDecision(hourlyReference) {
     bid: quote.bid,
     fee,
     totalCost,
-    expectedValue,
-    expectedRoi: expectedValue / Math.max(totalCost, 0.000001)
+    marketGap: signalProbability - totalCost
   };
 }
 
 function maybeNotifyDecision(decision, hourlyReference) {
-  if (!decision?.action || !els.decisionAlertsToggle?.checked || typeof Notification === "undefined") return;
+  if (!hourlyReference || hourlyReference.origin !== "live" || decision?.direction === "~") return;
+  if (!els.decisionAlertsToggle?.checked || typeof Notification === "undefined") return;
   if (Notification.permission !== "granted") return;
   const key = `${hourlyReference.bucket}-${decision.label}`;
   if (state.lastAlertKey === key) return;
   state.lastAlertKey = key;
-  new Notification(`BTC1H : occasion ${decision.label}`, {
-    body: `Modele ${Math.round(decision.signalProbability * 100)}% | achat ${formatCents(decision.ask)} | avantage net ${formatSignedCents(decision.expectedValue)}.`
+  new Notification(`BTC1H : proposition T-10 ${decision.label}`, {
+    body: `Creneau ${fmtTime.format(new Date(hourlyReference.bucket))}-${fmtTime.format(new Date(hourlyReference.bucket + 3600000))} | capture live | observation experimentale.`
   });
 }
 
@@ -1011,72 +1003,67 @@ function buildHourlyCloseModel(candles, model, spot, settings, backtest) {
 }
 
 function buildSecureOpeningReference(candles, spot) {
-  const reference = state.secureAnalysis?.opening;
+  const reference = state.secureAnalysis?.proposal;
   if (!reference) return null;
-  const bucket = hourStart(candles.at(-1).time);
-  if (Number(reference.bucket) !== bucket) return null;
-  const currentHour = candles.filter((candle) => candle.time >= bucket);
-  const high = Math.max(...currentHour.map((candle) => candle.high), spot);
-  const low = Math.min(...currentHour.map((candle) => candle.low), spot);
-  const open = Number(reference.open);
-  const closePrice = Number(reference.closePrice);
+  const bucket = Number(reference.targetHour);
+  const capturePrice = Number(reference.capturePrice);
   return {
     bucket,
-    capturedAt: Number(reference.capturedAt) || bucket,
-    isOpeningReference: true,
+    capturedAt: Number(reference.capturedAt),
+    featureCutoff: Number(reference.featureCutoff),
+    isPrehourProposal: true,
     isSecureReference: true,
     modelVersion: state.secureAnalysis.modelVersion,
-    open,
+    capturePrice,
+    open: capturePrice,
     spot,
-    high,
-    low,
-    elapsed: currentHour.length,
-    remaining: Math.max(0, 60 - currentHour.length),
-    closePrice,
+    closePrice: null,
     direction: reference.direction,
     confidence: Number(reference.confidence),
     probabilityUp: Number(reference.probabilityUp),
-    edgeFromOpen: closePrice / open - 1,
+    origin: reference.origin,
+    actionable: reference.actionable === true,
     factors: [
-      { label: "Source fixe", value: "Moteur prive" },
+      { label: "Capture", value: fmtTime.format(new Date(reference.capturedAt)) },
+      { label: "Creneau cible", value: `${fmtTime.format(new Date(bucket))}-${fmtTime.format(new Date(bucket + 3600000))}` },
       { label: "Version modele", value: state.secureAnalysis.modelVersion },
-      { label: "Regime ouverture", value: reference.regime },
-      { label: "Acces", value: "Compte autorise" }
+      { label: "Regime T-10", value: reference.regime },
+      { label: "Origine", value: reference.origin === "live" ? "Capture live" : "Apercu non comptabilise" }
     ]
   };
 }
 
 function buildRemoteOpeningReference(candles, spot) {
   if (!state.studyObservations.length) return null;
-  const bucket = hourStart(candles.at(-1).time);
-  const row = state.studyObservations.find((observation) => Date.parse(observation.hour_open) === bucket);
+  const now = Date.now();
+  const current = hourStart(now);
+  const bucket = now >= current + 50 * 60000 ? current + 3600000 : current;
+  const row = state.studyObservations.find((observation) => Date.parse(observation.target_hour) === bucket);
   if (!row) return null;
   if (row.model_version !== FIXED_MODEL_VERSION) return null;
-  const currentHour = candles.filter((candle) => candle.time >= bucket);
-  const high = Math.max(...currentHour.map((candle) => candle.high), spot);
-  const low = Math.min(...currentHour.map((candle) => candle.low), spot);
+  if (row.prediction_origin !== "live") return null;
+  const capturePrice = Number(row.capture_price);
   return {
     bucket,
-    capturedAt: Date.parse(row.hour_open),
-    isOpeningReference: true,
+    capturedAt: Date.parse(row.captured_at),
+    featureCutoff: Date.parse(row.feature_cutoff),
+    isPrehourProposal: true,
     isRemoteReference: true,
     modelVersion: row.model_version,
-    open: Number(row.opening_price),
+    capturePrice,
+    open: capturePrice,
     spot,
-    high,
-    low,
-    elapsed: currentHour.length,
-    remaining: Math.max(0, 60 - currentHour.length),
-    closePrice: Number(row.predicted_close),
+    closePrice: null,
     direction: row.predicted_direction,
-    confidence: Number(row.calibrated_confidence),
-    probabilityUp: Number(row.features?.calibratedProbabilityUp),
-    edgeFromOpen: Number(row.predicted_close) / Number(row.opening_price) - 1,
+    confidence: Number(row.confidence),
+    probabilityUp: Number(row.probability_up),
+    origin: "live",
+    actionable: row.predicted_direction !== "~",
     factors: [
-      { label: "Source fixe", value: "Base persistante" },
+      { label: "Capture", value: fmtTime.format(new Date(row.captured_at)) },
+      { label: "Creneau cible", value: `${fmtTime.format(new Date(bucket))}-${fmtTime.format(new Date(bucket + 3600000))}` },
       { label: "Version modele", value: row.model_version },
-      { label: "Regime ouverture", value: row.regime },
-      { label: "Origine", value: row.prediction_origin === "live" ? "Prediction reelle" : "Rejeu historique" }
+      { label: "Origine", value: "Capture live persistante" }
     ]
   };
 }
@@ -1291,67 +1278,66 @@ function rsi(closes) {
 function renderMetrics(result) {
   const decision = result.profitDecision;
   els.signalCard.className = `hero-signal ${directionClass(decision.direction)}`;
-  els.directionValue.textContent = decision.direction === "+" || decision.direction === "-" ? decision.direction : "--";
-  const confidence = Math.round((decision.signalProbability || 0.5) * 100);
-  const directionWord = decision.direction === "+" ? "hausse" : "baisse";
-  if (decision.status === "action") {
-    els.directionText.textContent = `JOUER CETTE HEURE · Acheter ${decision.outcome}`;
-    els.directionContext.textContent = `Direction ${directionWord} · confiance ${confidence}% · cout avec frais ${formatCents(decision.totalCost)} · avantage ${formatSignedCents(decision.expectedValue)}.`;
-  } else if (decision.status === "missing-market") {
-    els.directionText.textContent = "NE PAS JOUER · prix du marche manquant";
-    els.directionContext.textContent = `Direction ${directionWord} · confiance ${confidence}%. Charge le creneau Polymarket pour verifier la rentabilite apres frais.`;
-  } else if (decision.status === "no-value") {
-    els.directionText.textContent = "NE PAS JOUER CETTE HEURE";
-    els.directionContext.textContent = `Direction ${directionWord} · confiance ${confidence}% · cout ${formatCents(decision.totalCost)} · avantage net ${formatSignedCents(decision.expectedValue)} insuffisant.`;
-  } else if (decision.status === "legacy-model") {
-    els.directionText.textContent = "NE PAS JOUER · repere incomplet";
-    els.directionContext.textContent = `Direction ${directionWord} · confiance ${confidence}%. Le nouveau modele prend le relais des que toutes les donnees sont disponibles.`;
+  els.directionValue.textContent = decision.direction || "~";
+  const directionWord = decision.direction === "+" ? "HAUSSE" : decision.direction === "-" ? "BAISSE" : "NEUTRE";
+  const target = result.hourlyReference?.bucket;
+  const targetLabel = target ? `${fmtTime.format(new Date(target))}-${fmtTime.format(new Date(target + 3600000))}` : "prochain creneau";
+  const capturedAt = result.hourlyReference?.capturedAt;
+  const attempted = Number(result.backtest?.attempted) || 0;
+  const wins = Number(result.backtest?.wins) || 0;
+  const liveAccuracy = attempted ? wins / attempted : null;
+  if (decision.status === "waiting-model") {
+    els.directionText.textContent = "EN ATTENTE DE LA PROPOSITION T-10";
+    els.directionContext.textContent = "Le moteur publie sa proposition dix minutes avant le debut du creneau cible.";
+  } else if (decision.status === "neutral") {
+    els.directionText.textContent = "PASSER · SIGNAL T-10 NEUTRE";
+    els.directionContext.textContent = `${targetLabel} · aucune direction assez nette · capture ${capturedAt ? fmtTime.format(new Date(capturedAt)) : "--"}.`;
   } else {
-    els.directionText.textContent = "NE PAS JOUER CETTE HEURE";
-    els.directionContext.textContent = `Direction ${directionWord} · confiance ${confidence}%. Une orientation existe, mais elle est trop faible pour risquer de l'argent.`;
+    els.directionText.textContent = `BIAIS ${directionWord} · OBSERVATION`;
+    els.directionContext.textContent = `${targetLabel} · capture ${capturedAt ? fmtTime.format(new Date(capturedAt)) : "--"} · fiabilite historique 54 sur 100.`;
   }
   els.spotValue.textContent = fmtUsd.format(result.spot);
-  els.forecastValue.textContent = fmtUsd.format(result.forecast);
-  els.forecastContext.textContent = `Confiance variable ${Math.round(result.confidence * 100)}% | horizon ${result.settings.horizon} min`;
+  els.forecastValue.textContent = decision.status === "waiting-model" ? "--" : decision.direction;
+  els.forecastContext.textContent = `${Math.round(FIXED_TEST_ACCURACY * 1000) / 10}% sur ${FIXED_TEST_DECISIONS} tests chronologiques`;
   if (result.hourlyHypothesis) {
-    const fixedDelta = result.hourlyHypothesis.forecastPrice - result.hourlyHypothesis.startPrice;
-    els.fixedTargetValue.textContent = fmtUsd.format(result.hourlyHypothesis.forecastPrice);
-    els.fixedTargetContext.textContent = `Confiance fixe ${Math.round(result.hourlyHypothesis.confidence * 100)}% | ${fmtDelta.format(fixedDelta)} depuis ouverture`;
+    const bucket = result.hourlyHypothesis.bucket;
+    els.fixedTargetValue.textContent = `${fmtTime.format(new Date(bucket))}-${fmtTime.format(new Date(bucket + 3600000))}`;
+    els.fixedTargetContext.textContent = `Capture ${fmtTime.format(new Date(result.hourlyHypothesis.capturedAt))} · proposition ${result.hourlyHypothesis.direction}`;
   } else {
     els.fixedTargetValue.textContent = "--";
-    els.fixedTargetContext.textContent = "Repere calcule au debut de l'heure";
+    els.fixedTargetContext.textContent = "Prochaine proposition dix minutes avant l'heure";
   }
-  els.deltaValue.textContent = fmtDelta.format(result.delta);
-  els.deltaContext.textContent = fmtPct.format(result.deltaPct);
+  els.deltaValue.textContent = liveAccuracy === null ? "--" : `${Math.round(liveAccuracy * 100)}%`;
+  els.deltaContext.textContent = attempted
+    ? `${wins}/${attempted} directions justes · objectif ${LIVE_VALIDATION_TARGET} captures`
+    : `Aucun resultat live termine · objectif ${LIVE_VALIDATION_TARGET} captures`;
   els.chartBadge.textContent = timeToNextHourLabel(new Date());
 }
 
 function renderPlainSummary(result) {
   const decision = result.profitDecision;
-  const liveDirection = displayDirection(result.direction, { value: result.forecast, reference: result.spot });
   const fixed = result.hourlyClose;
-  const fixedDirection = fixed
-    ? displayDirection(fixed.direction, { probabilityUp: fixed.probabilityUp, value: fixed.closePrice, reference: fixed.open })
-    : null;
-  const confidence = Math.round((decision.signalProbability || 0.5) * 100);
-  const decisionText = decision.action
-    ? `<strong class="summary-action is-play">JOUER</strong><span>Avantage net estime ${formatSignedCents(decision.expectedValue)} par part au prix actuel.</span>`
-    : decision.status === "missing-market"
-      ? `<strong class="summary-action">NE PAS JOUER</strong><span>Le prix Polymarket est requis pour verifier la rentabilite.</span>`
-      : `<strong class="summary-action">NE PAS JOUER</strong><span>Le filtre ne trouve pas assez d'avantage pour risquer une mise.</span>`;
+  const fixedDirection = fixed ? displayDirection(fixed.direction, { probabilityUp: fixed.probabilityUp }) : null;
+  const attempted = Number(result.backtest?.attempted) || 0;
+  const wins = Number(result.backtest?.wins) || 0;
+  const decisionText = decision.status === "waiting-model"
+    ? `<strong class="summary-action">ATTENDRE T-10</strong><span>Aucune proposition live disponible pour le creneau cible.</span>`
+    : decision.direction === "~"
+      ? `<strong class="summary-action">PASSER</strong><span>Le modele conserve une vraie zone neutre.</span>`
+      : `<strong class="summary-action">OBSERVER ${decision.direction}</strong><span>Proposition experimentale, sans ordre de mise.</span>`;
   els.plainSummary.innerHTML = `
     <p class="summary-decision">${decisionText}</p>
-    <p><strong>Direction retenue ${decision.direction}</strong><span>Confiance ${confidence}% · ${decision.direction === "+" ? "biais haussier" : "biais baissier"}.</span></p>
-    <p><strong>Lecture en direct ${liveDirection}</strong><span>Objectif ${fmtUsd.format(result.forecast)} · ${fmtDelta.format(result.delta)} depuis maintenant.</span></p>
-    ${fixed ? `<p><strong>Fin d'heure ${fixedDirection}</strong><span>Cloture estimee ${fmtUsd.format(fixed.closePrice)} · ouverture ${fmtUsd.format(fixed.open)}.</span></p>` : ""}
+    ${fixed ? `<p><strong>Creneau ${fmtTime.format(new Date(fixed.bucket))}-${fmtTime.format(new Date(fixed.bucket + 3600000))}</strong><span>Proposition ${fixedDirection} capturee a ${fmtTime.format(new Date(fixed.capturedAt))}.</span></p>` : ""}
+    <p><strong>Test historique</strong><span>${Math.round(FIXED_TEST_ACCURACY * 10000) / 100}% justes sur ${FIXED_TEST_DECISIONS} propositions, testees dans l'ordre du temps.</span></p>
+    <p><strong>Verification live</strong><span>${attempted ? `${wins}/${attempted} justes` : "aucun resultat termine"} · objectif ${LIVE_VALIDATION_TARGET} captures avant conclusion.</span></p>
   `;
 }
 
 function renderHypotheses(result) {
   const liveDirection = displayDirection(result.direction, { value: result.forecast, reference: result.spot });
   els.liveHypothesisCard.className = `hypothesis-card ${directionClass(liveDirection)}`;
-  els.liveHypothesisValue.textContent = `${liveDirection} ${Math.round(result.confidence * 100)}%`;
-  els.liveHypothesisContext.textContent = `Cap live ${fmtUsd.format(result.forecast)} (${fmtDelta.format(result.delta)}). Ce signal n'est pas une cote de pari.`;
+  els.liveHypothesisValue.textContent = liveDirection;
+  els.liveHypothesisContext.textContent = `Projection technique ${fmtUsd.format(result.forecast)} (${fmtDelta.format(result.delta)}). Non utilisee pour le bilan T-10.`;
 
   const fixed = result.hourlyHypothesis;
   if (!fixed) {
@@ -1360,22 +1346,25 @@ function renderHypotheses(result) {
     els.fixedHypothesisContext.textContent = "En attente de capture horaire.";
     return;
   }
-  const fixedDirection = displayDirection(fixed.direction, { value: fixed.forecastPrice, reference: fixed.startPrice });
+  const fixedDirection = displayDirection(fixed.direction);
   els.fixedHypothesisCard.className = `hypothesis-card ${directionClass(fixedDirection)}`;
-  els.fixedHypothesisValue.textContent = `${fixedDirection} ${Math.round(fixed.confidence * 100)}%`;
-  els.fixedHypothesisContext.textContent = `Repere garde pour juger l'heure: ouverture ${fmtTime.format(new Date(fixed.capturedAt))}, cloture estimee ${fmtUsd.format(fixed.forecastPrice)}.`;
+  els.fixedHypothesisValue.textContent = fixedDirection;
+  els.fixedHypothesisContext.textContent = `Proposition capturee a ${fmtTime.format(new Date(fixed.capturedAt))} pour ${fmtTime.format(new Date(fixed.bucket))}-${fmtTime.format(new Date(fixed.bucket + 3600000))}.`;
 }
 
 function renderHourlyCloseModel(hourlyClose) {
-  if (!els.hourlyCloseCard || !hourlyClose) return;
-  const direction = displayDirection(hourlyClose.direction, {
-    probabilityUp: hourlyClose.probabilityUp,
-    value: hourlyClose.closePrice,
-    reference: hourlyClose.open
-  });
+  if (!els.hourlyCloseCard) return;
+  if (!hourlyClose) {
+    els.hourlyCloseCard.className = "hourly-close-main is-neutral";
+    els.hourlyCloseValue.textContent = "~ EN ATTENTE";
+    els.hourlyCloseContext.textContent = "La proposition apparait a T-10 du prochain creneau.";
+    els.hourlyCloseFactors.innerHTML = "";
+    return;
+  }
+  const direction = displayDirection(hourlyClose.direction, { probabilityUp: hourlyClose.probabilityUp });
   els.hourlyCloseCard.className = `hourly-close-main ${directionClass(direction)}`;
-  els.hourlyCloseValue.textContent = `${direction} ${Math.round(hourlyClose.confidence * 100)}%`;
-  els.hourlyCloseContext.textContent = `Ouverture ${fmtUsd.format(hourlyClose.open)} | cloture estimee ${fmtUsd.format(hourlyClose.closePrice)} | ${fmtDelta.format(hourlyClose.closePrice - hourlyClose.open)} vs ouverture.`;
+  els.hourlyCloseValue.textContent = direction;
+  els.hourlyCloseContext.textContent = `Creneau ${fmtTime.format(new Date(hourlyClose.bucket))}-${fmtTime.format(new Date(hourlyClose.bucket + 3600000))} · capture T-10 a ${fmtTime.format(new Date(hourlyClose.capturedAt))} · historique 54,16% sur ${FIXED_TEST_DECISIONS}.`;
   els.hourlyCloseFactors.innerHTML = "";
   hourlyClose.factors.forEach((factor) => {
     const node = document.createElement("article");
@@ -1522,14 +1511,14 @@ async function refreshStudyDatabase(force = false) {
   els.databaseStatus.textContent = "Synchronisation...";
   els.databaseStatus.className = "database-status is-syncing";
   const fields = [
-    "hour_open", "prediction_origin", "model_version", "opening_price", "predicted_close",
-    "predicted_direction", "calibrated_confidence", "regime", "actual_close",
-    "actual_direction", "verdict", "absolute_error_pct", "features"
+    "target_hour", "captured_at", "feature_cutoff", "prediction_origin", "model_version",
+    "lead_minutes", "capture_price", "predicted_direction", "probability_up", "confidence",
+    "regime", "actual_open", "actual_close", "actual_direction", "verdict", "features"
   ].join(",");
   const requestHeaders = { apikey: key, Authorization: `Bearer ${session.access_token}` };
   const [response, summaryResponse] = await Promise.all([
-    fetch(`${url}/rest/v1/hourly_observations?select=${fields}&order=hour_open.desc&limit=1000`, { headers: requestHeaders }),
-    fetch(`${url}/rest/v1/hourly_study_overview?select=*`, { headers: requestHeaders })
+    fetch(`${url}/rest/v1/prehour_proposals?select=${fields}&order=target_hour.desc&limit=1000`, { headers: requestHeaders }),
+    fetch(`${url}/rest/v1/prehour_study_overview?select=*&model_version=eq.${encodeURIComponent(FIXED_MODEL_VERSION)}`, { headers: requestHeaders })
   ]);
   if (!response.ok || !summaryResponse.ok) {
     const status = !response.ok ? response.status : summaryResponse.status;
@@ -1541,7 +1530,7 @@ async function refreshStudyDatabase(force = false) {
   state.studySummary = (await summaryResponse.json())[0] || null;
   state.lastStudyFetch = Date.now();
   const total = Number(state.studySummary?.total) || state.studyObservations.length;
-  els.databaseStatus.textContent = `Connectee · ${total} h memorisees`;
+  els.databaseStatus.textContent = `Connectee · ${total} propositions T-10`;
   els.databaseStatus.className = "database-status is-connected";
   renderStudyDatabase(state.studyObservations, state.studySummary);
   if (state.candles.length >= 240) analyze();
@@ -1586,35 +1575,30 @@ function renderStudyDatabase(rows, summary = null) {
   const live = rows.filter((row) => row.prediction_origin === "live");
   const replay = rows.filter((row) => row.prediction_origin === "replay");
   const currentLive = currentModelRows.filter((row) => row.prediction_origin === "live");
-  const realRows = currentLive.length ? currentLive : currentModelRows;
+  const realRows = currentLive;
   const judged = realRows.filter((row) => row.verdict === "correct" || row.verdict === "wrong");
   const neutral = realRows.filter((row) => row.verdict === "neutral");
   const pending = realRows.filter((row) => row.verdict === "pending");
-  const completed = realRows.filter((row) => row.actual_close !== null && row.actual_close !== "" && Number.isFinite(Number(row.actual_close)));
   const winsCount = judged.filter((row) => row.verdict === "correct").length;
   const lossesCount = judged.filter((row) => row.verdict === "wrong").length;
   const accuracy = judged.length ? winsCount / judged.length : null;
-  const averageError = completed.length ? mean(completed.map((row) => Number(row.absolute_error_pct) || 0)) : null;
 
-  const regimes = ["directionnel", "volatil", "calme", "neutre"]
-    .map((regime) => studyBar(`Regime ${regime}`, currentModelRows.filter((row) => row.regime === regime)))
+  const regimes = ["normal", "volatil", "calme"]
+    .map((regime) => studyBar(`Regime ${regime}`, realRows.filter((row) => row.regime === regime)))
     .join("");
   const confidenceBands = [
-    { label: "Confiance < 55%", min: 0, max: 0.55 },
-    { label: "Confiance 55-60%", min: 0.55, max: 0.60 },
-    { label: "Confiance 60-65%", min: 0.60, max: 0.65 },
-    { label: "Confiance > 65%", min: 0.65, max: 1.01 }
+    { label: "Score 50-52%", min: 0.50, max: 0.52 },
+    { label: "Score 52-54%", min: 0.52, max: 0.54 },
+    { label: "Score 54-56%", min: 0.54, max: 0.56 },
+    { label: "Score > 56%", min: 0.56, max: 1.01 }
   ].map((band) => studyBar(
     band.label,
-    currentModelRows.filter((row) => Number(row.calibrated_confidence) >= band.min && Number(row.calibrated_confidence) < band.max)
+    realRows.filter((row) => Number(row.confidence) >= band.min && Number(row.confidence) < band.max)
   )).join("");
 
   const timeline = realRows.slice(0, 24).map((row) => {
-    const date = new Date(row.hour_open);
-    const direction = displayDirection(row.predicted_direction, {
-      value: row.predicted_close,
-      reference: row.opening_price
-    });
+    const date = new Date(row.target_hour);
+    const direction = displayDirection(row.predicted_direction);
     const verdictLabel = row.verdict === "correct"
       ? "JUSTE"
       : row.verdict === "wrong"
@@ -1622,13 +1606,10 @@ function renderStudyDatabase(rows, summary = null) {
         : row.verdict === "neutral"
           ? "SANS MISE"
           : "EN COURS";
-    const predictedPrice = Number(row.predicted_close);
-    const hasActualPrice = row.actual_close !== null && row.actual_close !== "" && Number.isFinite(Number(row.actual_close));
-    const actualPrice = hasActualPrice ? Number(row.actual_close) : null;
-    const hasError = row.absolute_error_pct !== null && row.absolute_error_pct !== "" && Number.isFinite(Number(row.absolute_error_pct));
-    const priceDetail = hasActualPrice
-      ? `Prevu ${fmtUsd.format(predictedPrice)} · reel ${fmtUsd.format(actualPrice)}`
-      : `Cloture prevue ${fmtUsd.format(predictedPrice)}`;
+    const hasActual = Number.isFinite(Number(row.actual_open)) && Number.isFinite(Number(row.actual_close));
+    const priceDetail = hasActual
+      ? `O ${fmtUsd.format(Number(row.actual_open))} · C ${fmtUsd.format(Number(row.actual_close))}`
+      : `Capture ${fmtUsd.format(Number(row.capture_price))}`;
     return `
       <article class="study-hour-row ${directionClass(direction)} verdict-${row.verdict}">
         <div class="study-hour-time">
@@ -1637,11 +1618,11 @@ function renderStudyDatabase(rows, summary = null) {
         </div>
         <div class="study-hour-direction">
           <strong>${direction}</strong>
-          <span>confiance ${Math.round(Number(row.calibrated_confidence) * 100)}%</span>
+          <span>score ${Math.round(Number(row.confidence) * 100)}%</span>
         </div>
         <div class="study-hour-prices">
           <span>${priceDetail}</span>
-          <small>${hasError ? `Erreur ${fmtAbsPct.format(Math.abs(Number(row.absolute_error_pct)))}` : `Regime ${row.regime}`}</small>
+          <small>Capture ${fmtTime.format(new Date(row.captured_at))} · regime ${row.regime}</small>
         </div>
         <strong class="study-hour-verdict">${verdictLabel}</strong>
       </article>
@@ -1650,16 +1631,16 @@ function renderStudyDatabase(rows, summary = null) {
 
   els.studyDatabase.innerHTML = `
     <section class="study-overview" aria-label="Bilan des analyses horaires">
-      <article><span>Heures observees</span><strong>${realRows.length}</strong><small>predictions faites en conditions reelles</small></article>
+      <article><span>Captures live T-10</span><strong>${realRows.length}</strong><small>uniquement les propositions reellement disponibles avant l'heure</small></article>
       <article><span>Decisions prises</span><strong>${judged.length}</strong><small>${winsCount} juste${winsCount > 1 ? "s" : ""} · ${lossesCount} fausse${lossesCount > 1 ? "s" : ""}</small></article>
-      <article class="${accuracy !== null && accuracy >= 0.55 ? "is-good" : accuracy === null ? "" : "is-bad"}"><span>Taux de reussite</span><strong>${accuracy === null ? "--" : `${Math.round(accuracy * 100)}%`}</strong><small>uniquement sur les heures jouables</small></article>
-      <article><span>Heures sans mise</span><strong>${neutral.length}</strong><small>direction donnee, risque refuse</small></article>
-      <article><span>Erreur de prix moyenne</span><strong>${averageError === null ? "--" : fmtAbsPct.format(Math.abs(averageError))}</strong><small>objectif compare a la cloture reelle</small></article>
+      <article class="${accuracy !== null && accuracy >= 0.55 ? "is-good" : accuracy === null ? "" : "is-bad"}"><span>Taux directionnel</span><strong>${accuracy === null ? "--" : `${Math.round(accuracy * 100)}%`}</strong><small>mesure experimentale, hors replays</small></article>
+      <article><span>Signaux neutres</span><strong>${neutral.length}</strong><small>aucune direction forcee</small></article>
+      <article><span>Replays exclus</span><strong>${currentModelRows.filter((row) => row.prediction_origin === "replay").length}</strong><small>conserves uniquement pour le diagnostic</small></article>
       <article><span>En cours</span><strong>${pending.length}</strong><small>resultat connu a la fin de l'heure</small></article>
     </section>
     <section class="study-hour-list-wrap">
       <div class="study-section-head">
-        <div><h3>Detail heure par heure</h3><p>Chaque ligne montre la direction, la confiance, les prix et la decision finale.</p></div>
+        <div><h3>Detail live heure par heure</h3><p>Chaque ligne provient d'une capture effectuee avant le creneau cible.</p></div>
         <span>${Math.min(24, realRows.length)} heures affichees</span>
       </div>
       <div class="study-hour-list">${timeline}</div>
@@ -1668,9 +1649,9 @@ function renderStudyDatabase(rows, summary = null) {
       <summary>Voir les statistiques techniques</summary>
       <section class="study-breakdowns">
         <div><h3>Precision par regime</h3>${regimes}</div>
-        <div><h3>Precision par niveau de confiance</h3>${confidenceBands}</div>
+        <div><h3>Precision par niveau de score</h3>${confidenceBands}</div>
       </section>
-      <p class="study-technical-note">Base complete : ${Number(summary?.total) || rows.length} heures · ${Number(summary?.live_total) || live.length} reelles · ${Number(summary?.replay_total) || replay.length} rejouees.</p>
+      <p class="study-technical-note">Base complete : ${Number(summary?.total) || rows.length} propositions · ${Number(summary?.live_total) || live.length} live · ${Number(summary?.replay_total) || replay.length} replays. Les replays ne sont jamais utilises dans le taux principal.</p>
     </details>
   `;
 }
@@ -1683,7 +1664,6 @@ function renderSupervision(result) {
     return;
   }
   const accuracyText = backtest.accuracy === null ? "--" : `${Math.round(backtest.accuracy * 100)}%`;
-  const confidenceMove = result.confidence - result.rawConfidence;
   const recentRows = backtest.rows.slice(-6).reverse().map((row) => {
     const direction = displayDirection(row.orientation || row.predicted);
     const verdict = row.correct === null ? "sans mise" : row.correct ? "juste" : "faux";
@@ -1691,7 +1671,7 @@ function renderSupervision(result) {
       <article class="supervision-row ${directionClass(direction)}">
         <span>${fmtTime.format(new Date(row.bucket))}</span>
         <strong>${direction} → ${row.actual}</strong>
-        <small>${verdict} | confiance ${Math.round(row.confidence * 100)}%</small>
+        <small>${verdict} | score ${Math.round(row.confidence * 100)}%</small>
       </article>
     `;
   }).join("");
@@ -1708,14 +1688,14 @@ function renderSupervision(result) {
       <small>heures ignorees car trop bruitees</small>
     </article>
     <article class="supervision-stat">
-      <span>Erreur moyenne</span>
-      <strong>${backtest.averageError === null ? "--" : fmtPct.format(backtest.averageError)}</strong>
-      <small>ecart entre projection et cloture</small>
+      <span>Captures live</span>
+      <strong>${backtest.rows.length}</strong>
+      <small>aucun replay dans ce bilan</small>
     </article>
     <article class="supervision-stat">
-      <span>Correction confiance</span>
-      <strong>${fmtPct.format(confidenceMove)}</strong>
-      <small>brut ${Math.round(result.rawConfidence * 100)}% -> affiche ${Math.round(result.confidence * 100)}%</small>
+      <span>Modele supervise</span>
+      <strong>T-10</strong>
+      <small>${FIXED_MODEL_VERSION}</small>
     </article>
     <div class="supervision-history">${recentRows}</div>
   `;
@@ -1723,7 +1703,6 @@ function renderSupervision(result) {
 
 function renderHourlyHistory(hours) {
   els.hourHistory.innerHTML = "";
-  const hypotheses = readHourlyHypotheses();
   if (!hours.length) {
     els.hourHistory.innerHTML = '<div class="history-empty">Pas encore assez de donnees horaires.</div>';
     return;
@@ -1731,11 +1710,15 @@ function renderHourlyHistory(hours) {
   hours.forEach((hour) => {
     const start = new Date(hour.bucket);
     const end = new Date(hour.bucket + 3600000);
-    const fixed = hypotheses[String(hour.bucket)];
-    const fixedDirection = fixed
-      ? displayDirection(fixed.direction, { value: fixed.forecastPrice, reference: fixed.startPrice })
-      : null;
-    const verdict = fixed ? (fixed.direction === "~" ? "sans mise" : fixedDirection === hour.direction ? "juste" : "faux") : "non capturee";
+    const fixed = state.studyObservations.find((row) => (
+      row.model_version === FIXED_MODEL_VERSION
+      && row.prediction_origin === "live"
+      && Date.parse(row.target_hour) === hour.bucket
+    ));
+    const fixedDirection = fixed ? displayDirection(fixed.predicted_direction) : null;
+    const verdict = fixed
+      ? fixed.verdict === "correct" ? "juste" : fixed.verdict === "wrong" ? "faux" : fixed.verdict === "neutral" ? "neutre" : "en cours"
+      : "non capturee";
     const node = document.createElement("article");
     node.className = `history-card ${directionClass(hour.direction)}`;
     node.innerHTML = `
@@ -1743,7 +1726,7 @@ function renderHourlyHistory(hours) {
       <strong>${hour.direction} ${fmtPct.format(hour.deltaPct)}</strong>
       <small>O ${fmtUsd.format(hour.open)} | C ${fmtUsd.format(hour.close)}</small>
       <small>Range ${fmtPct.format(hour.rangePct)} | ${hour.complete} min</small>
-      <small>Hypothese fixe : ${fixedDirection || "--"} ${verdict}</small>
+      <small>Proposition T-10 live : ${fixedDirection || "--"} ${verdict}</small>
     `;
     els.hourHistory.appendChild(node);
   });
@@ -1964,7 +1947,7 @@ function bindEvents() {
       els.decisionAlertsToggle.checked = false;
       setStatus("Notifications non autorisees par le navigateur.");
     } else {
-      setStatus("Alertes activees : BTC1H signalera uniquement une occasion nette.");
+      setStatus("Alertes activees : BTC1H signalera les propositions directionnelles T-10 live.");
       analyze();
     }
   });
@@ -2068,7 +2051,7 @@ function formatDuration(ms) {
 async function shareApp() {
   const shareData = {
     title: "BTC1H",
-    text: "Lecture directionnelle BTC 1h en temps reel avec orientation + ou -, confiance, rentabilite et historique horaire.",
+    text: "Proposition directionnelle BTC capturee dix minutes avant chaque creneau horaire, avec zone neutre et suivi live.",
     url: window.location.href
   };
   try {

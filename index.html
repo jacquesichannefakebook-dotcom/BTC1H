@@ -7,7 +7,7 @@
   <meta name="description" content="BTC1H analyse le Bitcoin en temps reel avec momentum, volatilite, EMA, MACD, RSI, volume, creneaux horaires et historique horaire.">
   <meta name="theme-color" content="#101312">
   <meta property="og:title" content="BTC1H">
-  <meta property="og:description" content="Lecture directionnelle BTC en temps reel, avec orientation + ou -, confiance, rentabilite et historique horaire.">
+  <meta property="og:description" content="Proposition directionnelle BTC capturee dix minutes avant chaque creneau horaire, avec zone neutre et suivi live.">
   <meta property="og:type" content="website">
   <meta property="og:image" content="icon.svg">
   <meta name="twitter:card" content="summary">
@@ -97,13 +97,9 @@
       <button id="rewardAdBtn" type="button">Voir une pub +2h</button>
     </section>
 
-    <section class="ad-slot ad-slot-wide" aria-label="Publicite">
-      <span>Partenaire</span>
-      <strong>Espace annonce 970 x 90</strong>
-      <small>Emplacement pret pour AdSense, sponsor direct ou affiliation crypto responsable.</small>
-    </section>
-
-    <section class="controls" aria-label="Parametres">
+    <details class="panel compact settings-panel">
+      <summary>Reglages secondaires</summary>
+      <section class="controls" aria-label="Parametres secondaires">
       <label>
         Horizon
         <select id="horizonInput">
@@ -125,7 +121,7 @@
         </select>
       </label>
       <label>
-        URL Polymarket (pour calculer la rentabilite)
+        URL Polymarket (contexte de prix, rentabilite non validee)
         <input id="marketUrlInput" type="search" placeholder="https://polymarket.com/event/...">
       </label>
       <button id="loadMarketBtn" type="button">Lire marche et prix</button>
@@ -139,9 +135,10 @@
       </label>
       <label class="check-row">
         <input id="decisionAlertsToggle" type="checkbox">
-        Alerte occasion nette
+        Alerte proposition T-10
       </label>
-    </section>
+      </section>
+    </details>
 
     <section class="status-line" id="statusLine" aria-live="polite">Pret.</section>
     <section class="status-line share-line" id="shareStatus" aria-live="polite"></section>
@@ -149,17 +146,17 @@
     <section class="decision-layout">
       <section class="hero-signal" id="signalCard" aria-label="Signal principal">
         <div>
-          <span>Direction estimee</span>
+          <span>Proposition directionnelle T-10</span>
           <strong id="directionValue">--</strong>
         </div>
         <div class="hero-details">
           <span id="directionText">En attente des donnees BTC.</span>
-          <small id="directionContext">La direction et la decision de jouer seront affichees separement.</small>
+          <small id="directionContext">La proposition apparait dix minutes avant le creneau cible.</small>
         </div>
       </section>
 
       <section class="clarity-card" aria-label="Resume lisible">
-        <h2>Cette heure</h2>
+        <h2>L'essentiel</h2>
         <div id="plainSummary" class="plain-summary">Chargement de l'analyse...</div>
       </section>
     </section>
@@ -171,34 +168,34 @@
         <small>prix BTC actuel</small>
       </article>
       <article class="stat">
-        <span>Cap live</span>
+        <span>Proposition T-10</span>
         <strong id="forecastValue">--</strong>
-        <small id="forecastContext">Recalculee en continu</small>
+        <small id="forecastContext">Resultat historique verifie</small>
       </article>
       <article class="stat">
-        <span>Repere d'ouverture</span>
+        <span>Creneau vise</span>
         <strong id="fixedTargetValue">--</strong>
-        <small id="fixedTargetContext">Capture au debut de l'heure</small>
+        <small id="fixedTargetContext">Capture dix minutes avant l'heure</small>
       </article>
       <article class="stat">
-        <span>Ecart live</span>
+        <span>Resultats live</span>
         <strong id="deltaValue">--</strong>
-        <small id="deltaContext">vs maintenant</small>
+        <small id="deltaContext">Replays exclus</small>
       </article>
     </section>
 
     <details class="panel compact">
-      <summary>Comparer les reperes</summary>
-      <section class="hypothesis-grid" aria-label="Hypotheses de confiance">
+      <summary>Voir les projections techniques secondaires</summary>
+      <section class="hypothesis-grid" aria-label="Projections techniques">
         <article class="hypothesis-card" id="liveHypothesisCard">
           <span>Hypothese live</span>
           <strong id="liveHypothesisValue">--</strong>
           <small id="liveHypothesisContext">Recalcule en continu.</small>
         </article>
         <article class="hypothesis-card" id="fixedHypothesisCard">
-          <span>Repere d'ouverture</span>
+          <span>Proposition T-10</span>
           <strong id="fixedHypothesisValue">--</strong>
-          <small id="fixedHypothesisContext">Capture une fois par heure.</small>
+          <small id="fixedHypothesisContext">Capturee avant le creneau cible.</small>
         </article>
       </section>
     </details>
@@ -206,13 +203,13 @@
     <section class="panel compact hourly-model-panel">
       <div class="panel-head">
         <div>
-          <h2>Prevision principale de l'heure</h2>
-          <p>Direction, confiance et objectif fixes a l'ouverture, puis compares au resultat reel.</p>
+          <h2>Proposition principale T-10</h2>
+          <p>Direction preparee dix minutes avant l'heure, puis mesuree face au sens reel du creneau.</p>
         </div>
       </div>
       <div class="hourly-close-grid">
         <article class="hourly-close-main" id="hourlyCloseCard">
-          <span>Cloture estimee</span>
+          <span>Direction du creneau cible</span>
           <strong id="hourlyCloseValue">--</strong>
           <small id="hourlyCloseContext">En attente des donnees.</small>
         </article>
@@ -220,7 +217,9 @@
       </div>
     </section>
 
-    <section class="workbench">
+    <details class="panel compact">
+      <summary>Voir le graphique detaille</summary>
+      <section class="workbench">
       <article class="panel chart-panel">
         <div class="panel-head">
           <div>
@@ -231,7 +230,8 @@
         </div>
         <svg id="priceChart" role="img" aria-label="Graphique BTC avec projection"></svg>
       </article>
-    </section>
+      </section>
+    </details>
 
     <details class="analysis-details">
       <summary>Voir les indicateurs et les creneaux</summary>
@@ -258,20 +258,9 @@
       </section>
     </details>
 
-    <section class="ad-grid" aria-label="Publicites">
-      <article class="ad-slot">
-        <span>Partenaire</span>
-        <strong>Espace annonce 300 x 250</strong>
-        <small>Signal, data, courtage, education ou newsletter.</small>
-      </article>
-      <article class="ad-slot">
-        <span>Partenaire</span>
-        <strong>Espace annonce natif</strong>
-        <small>Format integre, sans masquer les donnees importantes.</small>
-      </article>
-    </section>
-
-    <section class="panel compact priority-panel">
+    <details class="panel compact">
+      <summary>Voir le contexte technique</summary>
+      <section class="priority-panel">
       <div class="panel-head">
         <div>
           <h2>A etudier</h2>
@@ -279,7 +268,8 @@
         </div>
       </div>
       <div class="study-list" id="studyList"></div>
-    </section>
+      </section>
+    </details>
 
     <details class="panel compact">
       <summary>Voir l'historique horaire</summary>
@@ -297,18 +287,18 @@
       <div class="panel-head">
         <div>
           <h2>Fiabilite recente</h2>
-          <p>Le moteur rejoue les dernieres heures disponibles et ajuste sa confiance selon ses resultats recents.</p>
+          <p>Uniquement les propositions live capturees a T-10. Les replays restent exclus du taux principal.</p>
         </div>
       </div>
       <div class="supervision-grid" id="modelSupervision"></div>
     </details>
 
-    <details class="panel compact study-database-panel" open>
-      <summary>Analyses heure par heure</summary>
+    <details class="panel compact study-database-panel">
+      <summary>Voir le suivi live heure par heure</summary>
       <div class="panel-head">
         <div>
           <h2>Bilan des heures etudiees</h2>
-          <p>Decisions prises, heures sans mise, resultats et comparaison precise entre prevision et cloture.</p>
+          <p>Propositions live, zones neutres et resultats directionnels. Les replays sont affiches a part.</p>
         </div>
         <span class="database-status" id="databaseStatus">Mode local</span>
       </div>
