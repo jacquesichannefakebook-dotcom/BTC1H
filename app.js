@@ -12,6 +12,8 @@ const state = {
   quotaLocked: false,
   studyObservations: [],
   studySummary: null,
+  studySegments: [],
+  dataQuality: null,
   lastStudyFetch: 0
 };
 
@@ -1516,23 +1518,29 @@ async function refreshStudyDatabase(force = false) {
     "regime", "actual_open", "actual_close", "actual_direction", "verdict", "features"
   ].join(",");
   const requestHeaders = { apikey: key, Authorization: `Bearer ${session.access_token}` };
-  const [response, summaryResponse] = await Promise.all([
-    fetch(`${url}/rest/v1/prehour_proposals?select=${fields}&order=target_hour.desc&limit=1000`, { headers: requestHeaders }),
-    fetch(`${url}/rest/v1/prehour_study_overview?select=*&model_version=eq.${encodeURIComponent(FIXED_MODEL_VERSION)}`, { headers: requestHeaders })
+  const [response, summaryResponse, segmentsResponse, qualityResponse] = await Promise.all([
+    fetch(`${url}/rest/v1/prehour_proposals?select=${fields}&model_version=eq.${encodeURIComponent(FIXED_MODEL_VERSION)}&order=target_hour.desc&limit=1000`, { headers: requestHeaders }),
+    fetch(`${url}/rest/v1/prehour_study_overview?select=*&model_version=eq.${encodeURIComponent(FIXED_MODEL_VERSION)}`, { headers: requestHeaders }),
+    fetch(`${url}/rest/v1/prehour_performance_segments?select=*&model_version=eq.${encodeURIComponent(FIXED_MODEL_VERSION)}&prediction_origin=eq.live`, { headers: requestHeaders }),
+    fetch(`${url}/rest/v1/data_quality_overview?select=*`, { headers: requestHeaders })
   ]);
-  if (!response.ok || !summaryResponse.ok) {
-    const status = !response.ok ? response.status : summaryResponse.status;
+  const failedResponse = [response, summaryResponse, segmentsResponse, qualityResponse].find((item) => !item.ok);
+  if (failedResponse) {
+    const status = failedResponse.status;
     els.databaseStatus.textContent = `Base indisponible (${status})`;
     els.databaseStatus.className = "database-status is-error";
     throw new Error(`Base d'etude: ${status}`);
   }
   state.studyObservations = await response.json();
   state.studySummary = (await summaryResponse.json())[0] || null;
+  state.studySegments = await segmentsResponse.json();
+  state.dataQuality = (await qualityResponse.json())[0] || null;
   state.lastStudyFetch = Date.now();
   const total = Number(state.studySummary?.total) || state.studyObservations.length;
-  els.databaseStatus.textContent = `Connectee · ${total} propositions T-10`;
+  const candleTotal = Number(state.dataQuality?.candle_total) || 0;
+  els.databaseStatus.textContent = `Connectee · ${total} propositions · ${candleTotal} bougies 1 min`;
   els.databaseStatus.className = "database-status is-connected";
-  renderStudyDatabase(state.studyObservations, state.studySummary);
+  renderStudyDatabase(state.studyObservations, state.studySummary, state.studySegments, state.dataQuality);
   if (state.candles.length >= 240) analyze();
 }
 
@@ -1555,7 +1563,25 @@ function studyBar(label, rows) {
   `;
 }
 
-function renderStudyDatabase(rows, summary = null) {
+function aggregateSegments(rows) {
+  const decisions = rows.reduce((total, row) => total + Number(row.decisions || 0), 0);
+  const wins = rows.reduce((total, row) => total + Number(row.wins || 0), 0);
+  return { decisions, wins, accuracy: decisions ? wins / decisions : null };
+}
+
+function databaseStudyBar(label, rows) {
+  const metric = aggregateSegments(rows);
+  const width = metric.accuracy === null ? 0 : Math.round(metric.accuracy * 100);
+  return `
+    <article class="study-band">
+      <div><span>${label}</span><strong>${metric.accuracy === null ? "--" : `${width}%`}</strong></div>
+      <div class="study-band-track"><i style="width:${width}%"></i></div>
+      <small>${metric.decisions} decisions tranchees</small>
+    </article>
+  `;
+}
+
+function renderStudyDatabase(rows, summary = null, segments = [], quality = null) {
   if (!els.studyDatabase) return;
   if (!remoteConfig.supabaseUrl || !remoteConfig.supabaseAnonKey) {
     els.studyDatabase.innerHTML = `
@@ -1579,22 +1605,41 @@ function renderStudyDatabase(rows, summary = null) {
   const judged = realRows.filter((row) => row.verdict === "correct" || row.verdict === "wrong");
   const neutral = realRows.filter((row) => row.verdict === "neutral");
   const pending = realRows.filter((row) => row.verdict === "pending");
-  const winsCount = judged.filter((row) => row.verdict === "correct").length;
-  const lossesCount = judged.filter((row) => row.verdict === "wrong").length;
-  const accuracy = judged.length ? winsCount / judged.length : null;
+  const judgedCount = summary?.live_judged_total == null ? judged.length : Number(summary.live_judged_total);
+  const winsCount = summary?.live_wins_total == null
+    ? judged.filter((row) => row.verdict === "correct").length
+    : Number(summary.live_wins_total);
+  const lossesCount = Math.max(0, judgedCount - winsCount);
+  const accuracy = summary?.live_accuracy == null
+    ? (judged.length ? winsCount / judged.length : null)
+    : Number(summary.live_accuracy);
+  const liveCount = summary?.live_total == null ? realRows.length : Number(summary.live_total);
+  const neutralCount = summary?.live_neutral_total == null ? neutral.length : Number(summary.live_neutral_total);
+  const pendingCount = summary?.live_pending_total == null ? pending.length : Number(summary.live_pending_total);
+  const replayCount = summary?.replay_total == null
+    ? currentModelRows.filter((row) => row.prediction_origin === "replay").length
+    : Number(summary.replay_total);
+  const brier = summary?.live_brier == null ? null : Number(summary.live_brier);
+  const logLoss = summary?.live_log_loss == null ? null : Number(summary.live_log_loss);
 
   const regimes = ["normal", "volatil", "calme"]
-    .map((regime) => studyBar(`Regime ${regime}`, realRows.filter((row) => row.regime === regime)))
+    .map((regime) => segments.length
+      ? databaseStudyBar(`Regime ${regime}`, segments.filter((row) => row.regime === regime))
+      : studyBar(`Regime ${regime}`, realRows.filter((row) => row.regime === regime)))
     .join("");
-  const confidenceBands = [
-    { label: "Score 50-52%", min: 0.50, max: 0.52 },
-    { label: "Score 52-54%", min: 0.52, max: 0.54 },
-    { label: "Score 54-56%", min: 0.54, max: 0.56 },
-    { label: "Score > 56%", min: 0.56, max: 1.01 }
-  ].map((band) => studyBar(
-    band.label,
-    realRows.filter((row) => Number(row.confidence) >= band.min && Number(row.confidence) < band.max)
-  )).join("");
+  const confidenceBands = segments.length
+    ? ["50-52%", "52-54%", "54-56%", "56%+"].map((band) => (
+        databaseStudyBar(`Score ${band}`, segments.filter((row) => row.confidence_band === band))
+      )).join("")
+    : [
+        { label: "Score 50-52%", min: 0.50, max: 0.52 },
+        { label: "Score 52-54%", min: 0.52, max: 0.54 },
+        { label: "Score 54-56%", min: 0.54, max: 0.56 },
+        { label: "Score > 56%", min: 0.56, max: 1.01 }
+      ].map((band) => studyBar(
+        band.label,
+        realRows.filter((row) => Number(row.confidence) >= band.min && Number(row.confidence) < band.max)
+      )).join("");
 
   const timeline = realRows.slice(0, 24).map((row) => {
     const date = new Date(row.target_hour);
@@ -1631,12 +1676,14 @@ function renderStudyDatabase(rows, summary = null) {
 
   els.studyDatabase.innerHTML = `
     <section class="study-overview" aria-label="Bilan des analyses horaires">
-      <article><span>Captures live T-10</span><strong>${realRows.length}</strong><small>uniquement les propositions reellement disponibles avant l'heure</small></article>
-      <article><span>Decisions prises</span><strong>${judged.length}</strong><small>${winsCount} juste${winsCount > 1 ? "s" : ""} · ${lossesCount} fausse${lossesCount > 1 ? "s" : ""}</small></article>
+      <article><span>Captures live T-10</span><strong>${liveCount}</strong><small>uniquement les propositions reellement disponibles avant l'heure</small></article>
+      <article><span>Decisions prises</span><strong>${judgedCount}</strong><small>${winsCount} juste${winsCount > 1 ? "s" : ""} · ${lossesCount} fausse${lossesCount > 1 ? "s" : ""}</small></article>
       <article class="${accuracy !== null && accuracy >= 0.55 ? "is-good" : accuracy === null ? "" : "is-bad"}"><span>Taux directionnel</span><strong>${accuracy === null ? "--" : `${Math.round(accuracy * 100)}%`}</strong><small>mesure experimentale, hors replays</small></article>
-      <article><span>Signaux neutres</span><strong>${neutral.length}</strong><small>aucune direction forcee</small></article>
-      <article><span>Replays exclus</span><strong>${currentModelRows.filter((row) => row.prediction_origin === "replay").length}</strong><small>conserves uniquement pour le diagnostic</small></article>
-      <article><span>En cours</span><strong>${pending.length}</strong><small>resultat connu a la fin de l'heure</small></article>
+      <article><span>Signaux neutres</span><strong>${neutralCount}</strong><small>aucune direction forcee</small></article>
+      <article><span>Replays exclus</span><strong>${replayCount}</strong><small>conserves uniquement pour le diagnostic</small></article>
+      <article><span>En cours</span><strong>${pendingCount}</strong><small>resultat connu a la fin de l'heure</small></article>
+      <article><span>Score de Brier</span><strong>${brier === null ? "--" : brier.toFixed(4)}</strong><small>plus proche de 0 = probabilites mieux calibrees</small></article>
+      <article><span>Log-loss</span><strong>${logLoss === null ? "--" : logLoss.toFixed(4)}</strong><small>penalise fortement les erreurs trop confiantes</small></article>
     </section>
     <section class="study-hour-list-wrap">
       <div class="study-section-head">
@@ -1651,7 +1698,7 @@ function renderStudyDatabase(rows, summary = null) {
         <div><h3>Precision par regime</h3>${regimes}</div>
         <div><h3>Precision par niveau de score</h3>${confidenceBands}</div>
       </section>
-      <p class="study-technical-note">Base complete : ${Number(summary?.total) || rows.length} propositions · ${Number(summary?.live_total) || live.length} live · ${Number(summary?.replay_total) || replay.length} replays. Les replays ne sont jamais utilises dans le taux principal.</p>
+      <p class="study-technical-note">Base complete : ${Number(summary?.total) || rows.length} propositions · ${liveCount} live · ${replayCount} replays · ${Number(quality?.candle_total) || 0} bougies 1 minute. Les replays ne sont jamais utilises dans le taux principal.</p>
     </details>
   `;
 }
