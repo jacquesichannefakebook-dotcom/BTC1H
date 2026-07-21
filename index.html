@@ -121,10 +121,11 @@
         </select>
       </label>
       <label>
-        URL Polymarket (contexte de prix, rentabilite non validee)
+        URL Polymarket (secours manuel uniquement)
         <input id="marketUrlInput" type="search" placeholder="https://polymarket.com/event/...">
       </label>
-      <button id="loadMarketBtn" type="button">Lire marche et prix</button>
+      <button id="loadMarketBtn" type="button">Charger manuellement</button>
+      <button id="autoMarketBtn" type="button">Revenir a la detection auto</button>
       <label class="check-row">
         <input id="liveToggle" type="checkbox" checked>
         Live
@@ -142,6 +143,28 @@
 
     <section class="status-line" id="statusLine" aria-live="polite">Pret.</section>
     <section class="status-line share-line" id="shareStatus" aria-live="polite"></section>
+
+    <section class="market-monitor" aria-label="Observation du marche public Polymarket">
+      <div class="market-monitor-main">
+        <span id="marketFeedStatus" class="market-feed-status">DETECTION AUTO</span>
+        <strong id="marketFeedWindow">Marche BTC horaire en attente</strong>
+        <small id="marketFeedQuestion">Le moteur cherchera automatiquement le creneau correspondant a la proposition T-10.</small>
+      </div>
+      <article class="market-quote-card is-up">
+        <span>Up achetable</span>
+        <strong id="marketUpAsk">--</strong>
+        <small id="marketUpBook">Carnet en attente</small>
+      </article>
+      <article class="market-quote-card is-down">
+        <span>Down achetable</span>
+        <strong id="marketDownAsk">--</strong>
+        <small id="marketDownBook">Carnet en attente</small>
+      </article>
+      <div class="market-snapshots">
+        <span>Captures conservees</span>
+        <div id="marketSnapshotTrail" class="market-snapshot-trail"></div>
+      </div>
+    </section>
 
     <section class="decision-layout">
       <section class="hero-signal" id="signalCard" aria-label="Signal principal">

@@ -7,6 +7,14 @@ const state = {
   liveTimer: null,
   market: null,
   marketPricing: null,
+  marketMode: "auto",
+  marketTargetHour: null,
+  marketSnapshots: [],
+  marketStream: null,
+  marketStreamKey: null,
+  marketHeartbeat: null,
+  marketStreamStatus: "waiting",
+  lastMarketFetch: 0,
   lastAlertKey: null,
   quotaTimer: null,
   quotaLocked: false,
@@ -65,6 +73,7 @@ const els = {
   sensitivityInput: document.getElementById("sensitivityInput"),
   marketUrlInput: document.getElementById("marketUrlInput"),
   loadMarketBtn: document.getElementById("loadMarketBtn"),
+  autoMarketBtn: document.getElementById("autoMarketBtn"),
   liveToggle: document.getElementById("liveToggle"),
   indicatorChartsToggle: document.getElementById("indicatorChartsToggle"),
   decisionAlertsToggle: document.getElementById("decisionAlertsToggle"),
@@ -102,6 +111,14 @@ const els = {
   studyDatabase: document.getElementById("studyDatabase"),
   databaseStatus: document.getElementById("databaseStatus"),
   marketQuestion: document.getElementById("marketQuestion"),
+  marketFeedStatus: document.getElementById("marketFeedStatus"),
+  marketFeedWindow: document.getElementById("marketFeedWindow"),
+  marketFeedQuestion: document.getElementById("marketFeedQuestion"),
+  marketUpAsk: document.getElementById("marketUpAsk"),
+  marketUpBook: document.getElementById("marketUpBook"),
+  marketDownAsk: document.getElementById("marketDownAsk"),
+  marketDownBook: document.getElementById("marketDownBook"),
+  marketSnapshotTrail: document.getElementById("marketSnapshotTrail"),
   logBox: document.getElementById("logBox")
 };
 
@@ -345,6 +362,7 @@ async function signOut() {
   if (state.quotaTimer) clearInterval(state.quotaTimer);
   state.liveTimer = null;
   state.quotaTimer = null;
+  disconnectMarketStream();
   clearAuthSession();
   els.appShell.hidden = true;
   els.authGate.hidden = false;
@@ -410,6 +428,7 @@ function bindAuthEvents() {
 
 function startAuthorizedApp() {
   configureAdminAccess();
+  renderMarketMonitor();
   if (state.appStarted) {
     restartLiveTimer();
     fetchSecureAnalysis().catch(showError);
@@ -532,13 +551,19 @@ async function fetchSecureAnalysis() {
     volume: Number(row.volume)
   }));
   setStatus(`BTC actualise: ${new Date().toLocaleTimeString("fr-FR")}`);
-  if (state.market) {
+  if (state.marketMode === "manual" && state.market) {
     await refreshMarketPricing().catch((error) => {
       state.marketPricing = null;
       log(`Prix Polymarket indisponibles: ${error.message}`);
+      renderMarketMonitor(error.message);
       analyze();
     });
   } else {
+    await refreshAutomaticMarketContext().catch((error) => {
+      state.marketPricing = null;
+      state.marketStreamStatus = "unavailable";
+      renderMarketMonitor(error.message);
+    });
     analyze();
   }
   refreshStudyDatabase().catch(() => null);
@@ -550,7 +575,12 @@ async function loadMarketFromUrl() {
   const slug = extractSlug(raw);
   setStatus("Lecture du creneau Polymarket...");
   const market = await fetchMarketOrEvent(slug);
+  disconnectMarketStream();
+  state.marketMode = "manual";
+  state.marketStreamStatus = "waiting";
   state.market = market;
+  state.marketTargetHour = null;
+  state.marketSnapshots = [];
   state.marketPricing = null;
   const minutes = inferMinutesLeft(market);
   if (minutes) {
@@ -563,6 +593,293 @@ async function loadMarketFromUrl() {
   els.marketQuestion.textContent = question;
   log(`Creneau lu: ${question}`);
   await refreshMarketPricing();
+  renderMarketMonitor();
+}
+
+function automaticTargetHour() {
+  const proposalTarget = Number(state.secureAnalysis?.proposal?.targetHour);
+  if (Number.isFinite(proposalTarget)) return proposalTarget;
+  const now = Date.now();
+  const currentHour = Math.floor(now / 3600000) * 3600000;
+  return now >= currentHour + 50 * 60000 ? currentHour + 3600000 : currentHour;
+}
+
+async function enableAutomaticMarket() {
+  state.marketMode = "auto";
+  state.market = null;
+  state.marketPricing = null;
+  state.marketTargetHour = null;
+  state.marketSnapshots = [];
+  state.lastMarketFetch = 0;
+  els.marketUrlInput.value = "";
+  disconnectMarketStream();
+  renderMarketMonitor();
+  await refreshAutomaticMarketContext(true);
+  analyze();
+}
+
+async function refreshAutomaticMarketContext(force = false) {
+  if (state.marketMode !== "auto") return;
+  const targetHour = automaticTargetHour();
+  const sameTarget = state.marketTargetHour === targetHour;
+  if (!force && sameTarget && Date.now() - state.lastMarketFetch < 30000) {
+    if (state.market) connectMarketStream();
+    return;
+  }
+  state.lastMarketFetch = Date.now();
+  if (!sameTarget) {
+    disconnectMarketStream();
+    state.market = null;
+    state.marketPricing = null;
+    state.marketSnapshots = [];
+  }
+  state.marketTargetHour = targetHour;
+  renderMarketMonitor();
+
+  const encodedTarget = encodeURIComponent(new Date(targetHour).toISOString());
+  const [marketRows, quoteRows] = await Promise.all([
+    authorizedRest(`polymarket_hourly_markets?select=*&target_hour=eq.${encodedTarget}&limit=1`),
+    authorizedRest(
+      `proposal_market_quotes?select=snapshot_label,observed_at,up_bid,up_ask,down_bid,down_ask,up_bid_size,up_ask_size,down_bid_size,down_ask_size,book_timestamp`
+      + `&target_hour=eq.${encodedTarget}&model_version=eq.${encodeURIComponent(FIXED_MODEL_VERSION)}`
+      + "&snapshot_label=not.is.null&order=observed_at.asc"
+    )
+  ]);
+  const mapping = asArray(marketRows)[0];
+  state.marketSnapshots = asArray(quoteRows);
+  if (!mapping) {
+    state.market = null;
+    state.marketPricing = null;
+    state.marketStreamStatus = "waiting";
+    renderMarketMonitor();
+    return;
+  }
+
+  state.market = {
+    ...mapping,
+    id: mapping.market_id,
+    slug: mapping.market_slug || mapping.event_slug,
+    question: mapping.question,
+    outcomes: mapping.outcomes,
+    clobTokenIds: [mapping.up_token_id, mapping.down_token_id],
+    feesEnabled: mapping.metadata?.fees_enabled,
+    feeSchedule: mapping.metadata?.fee_schedule,
+    automatic: true
+  };
+  const latest = state.marketSnapshots.at(-1);
+  if (latest) {
+    state.marketPricing = {
+      "+": {
+        outcome: "Up",
+        tokenId: mapping.up_token_id,
+        bid: numberOrNull(latest.up_bid),
+        ask: numberOrNull(latest.up_ask),
+        bidSize: numberOrNull(latest.up_bid_size),
+        askSize: numberOrNull(latest.up_ask_size)
+      },
+      "-": {
+        outcome: "Down",
+        tokenId: mapping.down_token_id,
+        bid: numberOrNull(latest.down_bid),
+        ask: numberOrNull(latest.down_ask),
+        bidSize: numberOrNull(latest.down_bid_size),
+        askSize: numberOrNull(latest.down_ask_size)
+      }
+    };
+    state.marketStreamStatus = "database";
+  } else {
+    state.marketPricing = null;
+    state.marketStreamStatus = "waiting";
+  }
+  renderMarketMonitor();
+  connectMarketStream();
+}
+
+function numberOrNull(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function disconnectMarketStream() {
+  if (state.marketHeartbeat) clearInterval(state.marketHeartbeat);
+  state.marketHeartbeat = null;
+  const socket = state.marketStream;
+  state.marketStream = null;
+  state.marketStreamKey = null;
+  if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, "BTC1H rollover");
+}
+
+function connectMarketStream() {
+  if (state.marketMode !== "auto" || !state.market || !els.liveToggle.checked || state.quotaLocked) return;
+  const tokenIds = parseArrayField(state.market.clobTokenIds || state.market.clob_token_ids).map(String).filter(Boolean);
+  if (tokenIds.length !== 2 || typeof WebSocket === "undefined") return;
+  const key = tokenIds.join(":");
+  if (state.marketStreamKey === key && state.marketStream
+      && (state.marketStream.readyState === WebSocket.OPEN || state.marketStream.readyState === WebSocket.CONNECTING)) return;
+  disconnectMarketStream();
+  state.marketStreamKey = key;
+  const socket = new WebSocket("wss://ws-subscriptions-clob.polymarket.com/ws/market");
+  state.marketStream = socket;
+  socket.addEventListener("open", () => {
+    if (state.marketStream !== socket) return;
+    socket.send(JSON.stringify({
+      assets_ids: tokenIds,
+      type: "market",
+      custom_feature_enabled: true
+    }));
+    state.marketStreamStatus = "live";
+    renderMarketMonitor();
+    state.marketHeartbeat = setInterval(() => {
+      if (socket.readyState === WebSocket.OPEN) socket.send("PING");
+    }, 10000);
+  });
+  socket.addEventListener("message", (event) => {
+    if (state.marketStream !== socket || event.data === "PONG") return;
+    try {
+      const payload = JSON.parse(event.data);
+      asArray(payload).forEach(applyMarketStreamMessage);
+    } catch {
+      return;
+    }
+  });
+  socket.addEventListener("error", () => {
+    if (state.marketStream !== socket) return;
+    state.marketStreamStatus = state.marketPricing ? "database" : "unavailable";
+    renderMarketMonitor("Flux direct indisponible; les captures de la base restent utilisees.");
+  });
+  socket.addEventListener("close", () => {
+    if (state.marketStream !== socket) return;
+    if (state.marketHeartbeat) clearInterval(state.marketHeartbeat);
+    state.marketHeartbeat = null;
+    state.marketStream = null;
+    state.marketStreamKey = null;
+    state.marketStreamStatus = state.marketPricing ? "database" : "unavailable";
+    renderMarketMonitor();
+  });
+}
+
+function streamDirection(assetId) {
+  if (String(assetId) === String(state.market?.up_token_id)) return "+";
+  if (String(assetId) === String(state.market?.down_token_id)) return "-";
+  const tokens = parseArrayField(state.market?.clobTokenIds || state.market?.clob_token_ids).map(String);
+  if (String(assetId) === tokens[0]) return "+";
+  if (String(assetId) === tokens[1]) return "-";
+  return null;
+}
+
+function applyMarketStreamMessage(message) {
+  if (!message || typeof message !== "object") return;
+  if (message.event_type === "book") {
+    const direction = streamDirection(message.asset_id);
+    if (!direction) return;
+    const bids = asArray(message.bids)
+      .map((row) => ({ price: Number(row.price), size: Number(row.size) }))
+      .filter((row) => Number.isFinite(row.price))
+      .sort((left, right) => right.price - left.price);
+    const asks = asArray(message.asks)
+      .map((row) => ({ price: Number(row.price), size: Number(row.size) }))
+      .filter((row) => Number.isFinite(row.price))
+      .sort((left, right) => left.price - right.price);
+    state.marketPricing ||= {};
+    state.marketPricing[direction] = {
+      ...(state.marketPricing[direction] || {}),
+      outcome: direction === "+" ? "Up" : "Down",
+      tokenId: message.asset_id,
+      bid: bids[0]?.price ?? null,
+      bidSize: bids[0]?.size ?? null,
+      ask: asks[0]?.price ?? null,
+      askSize: asks[0]?.size ?? null
+    };
+  } else if (message.event_type === "best_bid_ask") {
+    updateStreamTop(message.asset_id, message.best_bid, message.best_ask);
+  } else if (message.event_type === "price_change") {
+    asArray(message.price_changes).forEach((change) => {
+      updateStreamTop(change.asset_id, change.best_bid, change.best_ask);
+    });
+  } else {
+    return;
+  }
+  state.marketStreamStatus = "live";
+  renderMarketMonitor();
+  analyze();
+}
+
+function updateStreamTop(assetId, bidValue, askValue) {
+  const direction = streamDirection(assetId);
+  if (!direction) return;
+  state.marketPricing ||= {};
+  const current = state.marketPricing[direction] || {};
+  state.marketPricing[direction] = {
+    ...current,
+    outcome: direction === "+" ? "Up" : "Down",
+    tokenId: assetId,
+    bid: numberOrNull(bidValue),
+    ask: numberOrNull(askValue)
+  };
+}
+
+function renderMarketMonitor(detail = "") {
+  if (!els.marketFeedStatus) return;
+  const pricing = state.marketPricing || {};
+  const up = pricing["+"] || {};
+  const down = pricing["-"] || {};
+  const target = state.marketTargetHour;
+  const isManual = state.marketMode === "manual";
+  const status = isManual
+    ? "SECOURS MANUEL"
+    : state.marketStreamStatus === "live"
+      ? "DIRECT PUBLIC"
+      : state.marketStreamStatus === "database"
+        ? "CAPTURE BASE"
+        : state.marketStreamStatus === "unavailable"
+          ? "INDISPONIBLE"
+          : "DETECTION AUTO";
+  els.marketFeedStatus.textContent = status;
+  els.marketFeedStatus.className = `market-feed-status${state.marketStreamStatus === "live" ? " is-live" : ""}${state.marketStreamStatus === "unavailable" ? " is-unavailable" : ""}`;
+  els.marketFeedWindow.textContent = target
+    ? `Creneau ${fmtTime.format(new Date(target))}-${fmtTime.format(new Date(target + 3600000))}`
+    : isManual ? "Creneau fourni manuellement" : "Marche BTC horaire en attente";
+  els.marketFeedQuestion.textContent = detail
+    || state.market?.question
+    || "Le collecteur cherchera automatiquement le marche correspondant a la proposition T-10.";
+  els.marketUpAsk.textContent = formatCents(up.ask);
+  els.marketDownAsk.textContent = formatCents(down.ask);
+  els.marketUpBook.textContent = marketBookText(up);
+  els.marketDownBook.textContent = marketBookText(down);
+
+  const question = state.market?.question || state.market?.title || state.market?.slug || "Aucun creneau Polymarket detecte.";
+  els.marketQuestion.textContent = state.marketPricing
+    ? `${question} | achat Up ${formatCents(up.ask)} | achat Down ${formatCents(down.ask)}`
+    : question;
+  renderMarketSnapshotTrail();
+}
+
+function marketBookText(quote) {
+  if (!Number.isFinite(quote.bid) && !Number.isFinite(quote.ask)) return "Carnet en attente";
+  const spread = Number.isFinite(quote.bid) && Number.isFinite(quote.ask) ? quote.ask - quote.bid : null;
+  const size = Number.isFinite(quote.askSize) ? ` | taille ${quote.askSize.toFixed(2)}` : "";
+  return `achat ${formatCents(quote.ask)} | vente ${formatCents(quote.bid)}${spread === null ? "" : ` | spread ${formatCents(spread)}`}${size}`;
+}
+
+function renderMarketSnapshotTrail() {
+  if (!els.marketSnapshotTrail) return;
+  const labels = ["T-10", "T0", "T+1", "T+2", "T+3"];
+  const byLabel = new Map(state.marketSnapshots.map((row) => [row.snapshot_label, row]));
+  els.marketSnapshotTrail.innerHTML = "";
+  labels.forEach((label) => {
+    const row = byLabel.get(label);
+    const chip = document.createElement("article");
+    chip.className = `market-snapshot-chip${row ? " is-captured" : ""}`;
+    const title = document.createElement("strong");
+    title.textContent = label;
+    const value = document.createElement("small");
+    value.textContent = row
+      ? `Up ${formatCents(numberOrNull(row.up_ask))} | Down ${formatCents(numberOrNull(row.down_ask))}`
+      : "en attente";
+    chip.append(title, value);
+    els.marketSnapshotTrail.appendChild(chip);
+  });
 }
 
 async function fetchMarketOrEvent(slug) {
@@ -647,13 +964,21 @@ async function refreshMarketPricing() {
   }));
   const pricing = {};
   books.forEach(({ direction, outcome, tokenId, book }) => {
-    const asks = asArray(book.asks).map((row) => Number(row.price)).filter(Number.isFinite);
-    const bids = asArray(book.bids).map((row) => Number(row.price)).filter(Number.isFinite);
+    const asks = asArray(book.asks)
+      .map((row) => ({ price: Number(row.price), size: Number(row.size) }))
+      .filter((row) => Number.isFinite(row.price))
+      .sort((left, right) => left.price - right.price);
+    const bids = asArray(book.bids)
+      .map((row) => ({ price: Number(row.price), size: Number(row.size) }))
+      .filter((row) => Number.isFinite(row.price))
+      .sort((left, right) => right.price - left.price);
     pricing[direction] = {
       outcome,
       tokenId,
-      ask: asks.length ? Math.min(...asks) : null,
-      bid: bids.length ? Math.max(...bids) : null
+      ask: asks[0]?.price ?? null,
+      askSize: asks[0]?.size ?? null,
+      bid: bids[0]?.price ?? null,
+      bidSize: bids[0]?.size ?? null
     };
   });
   state.marketPricing = pricing;
@@ -661,6 +986,7 @@ async function refreshMarketPricing() {
   const down = pricing["-"];
   const question = state.market.question || state.market.title || state.market.slug || "Marche charge";
   els.marketQuestion.textContent = `${question} | achat Up ${formatCents(up?.ask)} | achat Down ${formatCents(down?.ask)}`;
+  renderMarketMonitor();
   analyze();
 }
 
@@ -1538,7 +1864,8 @@ async function refreshStudyDatabase(force = false) {
   state.lastStudyFetch = Date.now();
   const total = Number(state.studySummary?.total) || state.studyObservations.length;
   const candleTotal = Number(state.dataQuality?.candle_total) || 0;
-  els.databaseStatus.textContent = `Connectee · ${total} propositions · ${candleTotal} bougies 1 min`;
+  const marketQuoteTotal = Number(state.dataQuality?.polymarket_quote_total) || 0;
+  els.databaseStatus.textContent = `Connectee · ${total} propositions · ${candleTotal} bougies 1 min · ${marketQuoteTotal} captures marche`;
   els.databaseStatus.className = "database-status is-connected";
   renderStudyDatabase(state.studyObservations, state.studySummary, state.studySegments, state.dataQuality);
   if (state.candles.length >= 240) analyze();
@@ -1698,7 +2025,7 @@ function renderStudyDatabase(rows, summary = null, segments = [], quality = null
         <div><h3>Precision par regime</h3>${regimes}</div>
         <div><h3>Precision par niveau de score</h3>${confidenceBands}</div>
       </section>
-      <p class="study-technical-note">Base complete : ${Number(summary?.total) || rows.length} propositions · ${liveCount} live · ${replayCount} replays · ${Number(quality?.candle_total) || 0} bougies 1 minute. Les replays ne sont jamais utilises dans le taux principal.</p>
+      <p class="study-technical-note">Base complete : ${Number(summary?.total) || rows.length} propositions · ${liveCount} live · ${replayCount} replays · ${Number(quality?.candle_total) || 0} bougies 1 minute · ${Number(quality?.polymarket_quote_total) || 0} captures marche. Etat Polymarket : ${quality?.last_polymarket_status || "en attente"}. Les replays ne sont jamais utilises dans le taux principal.</p>
     </details>
   `;
 }
@@ -1961,7 +2288,11 @@ function circle(svg, cx, cy, r, fill) {
 function restartLiveTimer() {
   if (state.liveTimer) clearInterval(state.liveTimer);
   state.liveTimer = null;
-  if (!els.liveToggle.checked || state.quotaLocked) return;
+  if (!els.liveToggle.checked || state.quotaLocked) {
+    disconnectMarketStream();
+    return;
+  }
+  connectMarketStream();
   state.liveTimer = setInterval(() => {
     fetchSecureAnalysis().catch(showError);
   }, 10000);
@@ -1986,6 +2317,7 @@ function bindEvents() {
   els.overlayRewardAdBtn.addEventListener("click", grantRewardTime);
   els.refreshBtn.addEventListener("click", () => fetchSecureAnalysis().catch(showError));
   els.loadMarketBtn.addEventListener("click", () => loadMarketFromUrl().catch(showError));
+  els.autoMarketBtn.addEventListener("click", () => enableAutomaticMarket().catch(showError));
   els.liveToggle.addEventListener("change", restartLiveTimer);
   els.decisionAlertsToggle?.addEventListener("change", async () => {
     if (!els.decisionAlertsToggle.checked || typeof Notification === "undefined") return;

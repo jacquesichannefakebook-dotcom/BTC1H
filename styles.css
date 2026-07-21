@@ -295,6 +295,104 @@ button:focus {
   min-height: 0;
 }
 
+.market-monitor {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(150px, 0.32fr) minmax(150px, 0.32fr);
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 14px;
+  margin-bottom: 12px;
+}
+
+.market-monitor-main,
+.market-quote-card,
+.market-snapshots {
+  display: grid;
+  gap: 5px;
+}
+
+.market-monitor-main small,
+.market-quote-card span,
+.market-quote-card small,
+.market-snapshots > span {
+  color: var(--muted);
+}
+
+.market-feed-status {
+  width: fit-content;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  color: var(--accent);
+  padding: 3px 8px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.market-feed-status.is-live {
+  border-color: var(--good);
+  color: var(--good);
+}
+
+.market-feed-status.is-unavailable {
+  border-color: var(--bad);
+  color: var(--bad);
+}
+
+.market-quote-card {
+  align-content: center;
+  border-left: 2px solid var(--line);
+  padding-left: 14px;
+}
+
+.market-quote-card.is-up {
+  border-color: var(--good);
+}
+
+.market-quote-card.is-down {
+  border-color: var(--bad);
+}
+
+.market-quote-card strong {
+  font-size: 1.7rem;
+}
+
+.market-snapshots {
+  grid-column: 1 / -1;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.market-snapshot-trail {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(90px, 1fr));
+  gap: 6px;
+}
+
+.market-snapshot-chip {
+  display: grid;
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-2);
+  padding: 7px 9px;
+}
+
+.market-snapshot-chip strong {
+  font-size: 0.78rem;
+}
+
+.market-snapshot-chip small {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.market-snapshot-chip.is-captured {
+  border-color: var(--accent);
+}
+
 .quota-bar {
   display: grid;
   grid-template-columns: minmax(170px, auto) 1fr auto;
@@ -1268,6 +1366,14 @@ details[open] > summary {
     grid-template-columns: 1fr 1fr;
   }
 
+  .market-monitor {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .market-monitor-main {
+    grid-column: 1 / -1;
+  }
+
   .chart-panel {
     grid-column: 1 / -1;
   }
@@ -1310,6 +1416,16 @@ details[open] > summary {
   .quota-bar,
   .ad-grid {
     grid-template-columns: 1fr;
+  }
+
+  .market-monitor,
+  .market-snapshot-trail {
+    grid-template-columns: 1fr;
+  }
+
+  .market-monitor-main,
+  .market-snapshots {
+    grid-column: auto;
   }
 
   .study-section-head {
